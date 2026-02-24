@@ -11,8 +11,9 @@ import polars as pl
 import typer
 import yaml
 
+from mf_etl.bronze.writer import write_bronze_artifacts
 from mf_etl.config import AppSettings, load_settings
-from mf_etl.ingest.discover import discover_txt_files, infer_exchange_from_path
+from mf_etl.ingest.discover import discover_txt_files, extract_ticker_hint, infer_exchange_from_path
 from mf_etl.ingest.manifest import build_manifest, write_manifest_parquet
 from mf_etl.ingest.read_txt import read_stock_txt_with_rejects
 from mf_etl.logging_utils import configure_logging
@@ -331,6 +332,99 @@ def validate_sample(
     typer.echo(f"max_trade_date: {max_trade_date.isoformat() if max_trade_date is not None else None}")
     typer.echo("quality_report_preview:")
     typer.echo(json.dumps(validation_result.quality_report, indent=2, sort_keys=True, default=str))
+
+
+@app.command("bronze-one")
+def bronze_one(
+    file: Path = typer.Option(
+        ...,
+        "--file",
+        help="Path to one source TXT file.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    exchange: str | None = typer.Option(
+        None,
+        "--exchange",
+        help="Exchange label override (for example: NASDAQ, NYSE).",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run single-file Bronze parse, validate, and atomic artifact writes."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    inferred_exchange = infer_exchange_from_path(file, logger=logger)
+    selected_exchange = exchange.strip().upper() if exchange else inferred_exchange
+    run_id = f"bronze-one-{uuid4().hex[:12]}"
+
+    try:
+        raw_result = read_stock_txt_with_rejects(file, logger=logger)
+        metadata = BronzeNormalizeMetadata.build(
+            source_file=file,
+            exchange=selected_exchange,
+            run_id=run_id,
+        )
+        normalized = normalize_bronze_rows(raw_result.data, metadata=metadata)
+
+        thresholds = ValidationThresholds(
+            suspicious_range_pct_threshold=settings.validation.suspicious_range_pct_threshold,
+            suspicious_return_pct_threshold=settings.validation.suspicious_return_pct_threshold,
+            gap_days_warn_threshold=settings.validation.gap_days_warn_threshold,
+        )
+        validation_result = validate_bronze_dataframe(
+            normalized,
+            thresholds=thresholds,
+            header_skipped=raw_result.skipped_header,
+            malformed_raw_rows_count=raw_result.rejects.height,
+        )
+
+        fallback_ticker = extract_ticker_hint(file)
+        write_result = write_bronze_artifacts(
+            bronze_root=settings.paths.bronze_root,
+            validation_result=validation_result,
+            quality_report=validation_result.quality_report,
+            fallback_ticker=fallback_ticker,
+            fallback_exchange=selected_exchange,
+            fallback_run_id=run_id,
+            compression=settings.parquet.compression,
+            compression_level=settings.parquet.compression_level,
+            statistics=settings.parquet.statistics,
+            malformed_rows=raw_result.rejects if raw_result.rejects.height > 0 else None,
+        )
+    except Exception as exc:
+        logger.exception("bronze_one.failed file=%s exchange=%s", file, selected_exchange)
+        raise RuntimeError(f"bronze-one failed for file {file}: {exc}") from exc
+
+    logger.info(
+        "bronze_one.summary file=%s ticker=%s raw_rows=%s valid_rows=%s reject_rows=%s bronze_path=%s rejects_path=%s quality_report_path=%s",
+        file,
+        write_result.ticker,
+        raw_result.data.height,
+        write_result.rows_valid,
+        write_result.rows_invalid,
+        write_result.bronze_path,
+        write_result.rejects_path,
+        write_result.quality_report_path,
+    )
+
+    typer.echo(f"file: {file}")
+    typer.echo(f"ticker: {write_result.ticker}")
+    typer.echo(f"raw_rows: {raw_result.data.height}")
+    typer.echo(f"valid_rows: {write_result.rows_valid}")
+    typer.echo(f"reject_rows: {write_result.rows_invalid}")
+    typer.echo(f"bronze_parquet: {write_result.bronze_path}")
+    typer.echo(f"rejects_parquet: {write_result.rejects_path if write_result.rejects_path else 'none'}")
+    typer.echo(f"quality_report_json: {write_result.quality_report_path}")
 
 
 def main() -> None:

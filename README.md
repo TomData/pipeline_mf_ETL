@@ -223,3 +223,35 @@ Exported datasets are written to:
 
 - `data/gold/datasets/ml_dataset_v1/<run_id>/dataset.parquet`
 - `data/gold/datasets/ml_dataset_v1/<run_id>/metadata.json`
+
+## Research Baseline v1
+
+Research Baseline v1 provides reproducible unsupervised state discovery on top of exported Gold feature datasets.
+Pipeline components:
+
+- dataset loading with optional filters/sampling
+- preprocessing (feature selection, null filtering, scaling, clipping)
+- clustering:
+  - KMeans baseline
+  - Gaussian Mixture baseline
+  - optional HDBSCAN (if installed)
+- cluster profiling and forward-return validation
+
+Core commands:
+
+- `python -m mf_etl.cli research-cluster-run --dataset /abs/path/dataset.parquet --method kmeans --n-clusters 5`
+- `python -m mf_etl.cli research-cluster-run --dataset /abs/path/dataset.parquet --method gmm --n-clusters 5`
+- `python -m mf_etl.cli research-cluster-sweep --dataset /abs/path/dataset.parquet`
+- `python -m mf_etl.cli research-cluster-sanity --run-dir /abs/path/to/artifacts/research_runs/<run_dir>`
+
+Run artifacts:
+
+- `artifacts/research_runs/<run_id>_<method>_<dataset_tag>/run_summary.json`
+- `artifacts/research_runs/<run_id>_<method>_<dataset_tag>/preprocess_summary.json`
+- `artifacts/research_runs/<run_id>_<method>_<dataset_tag>/clustering_metrics.json`
+- `artifacts/research_runs/<run_id>_<method>_<dataset_tag>/cluster_profile.parquet`
+- `artifacts/research_runs/<run_id>_<method>_<dataset_tag>/cluster_profile.csv`
+- `artifacts/research_runs/<run_id>_<method>_<dataset_tag>/clustered_dataset_sample.parquet`
+
+Cluster profiles include forward-return validation columns (`fwd_ret_5/10/20` means/medians/hit rates) to evaluate separation before moving to sequential/HMM modeling.
+Forward validation aggregates are computed using finite-value-only inputs (NaN/inf are normalized to null before aggregation) for QA consistency.

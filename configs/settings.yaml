@@ -53,3 +53,43 @@ gold_features:
   float_dtype_override: null
   export:
     default_drop_null_key_features: true
+
+research_clustering:
+  default_feature_list:
+    - tmf_21
+    - tmf_abs
+    - tmf_slope_1
+    - tmf_slope_5
+    - tmf_slope_10
+    - tmf_curvature_1
+    - tti_proxy_v1_21
+    - tti_proxy_slope_1
+    - tti_proxy_slope_5
+    - long_flow_score_20
+    - short_flow_score_20
+    - delta_flow_20
+    - flow_activity_20
+    - flow_bias_20
+    - long_burst_20
+    - short_burst_20
+    - persistence_pos_20
+    - persistence_neg_20
+    - oscillation_index_20
+    - respect_fail_balance_20
+    - rec_tmf_zero_up_20
+    - rec_tmf_zero_down_20
+    - rec_tmf_burst_up_20
+    - rec_tmf_burst_down_20
+    - state_run_length
+  scaler: standard
+  clip_zscore: 8.0
+  silhouette_sample_max: 200000
+  random_state: 42
+  kmeans:
+    n_init: 20
+    max_iter: 300
+  gmm:
+    covariance_type: diag
+    reg_covar: 1.0e-6
+    max_iter: 200
+  forward_windows: [5, 10, 20]

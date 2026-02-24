@@ -51,6 +51,8 @@ from mf_etl.gold.features_pipeline import (
     run_features_pipeline,
     run_features_sanity,
 )
+from mf_etl.research.pipeline import run_research_cluster, run_research_cluster_sweep
+from mf_etl.research.sanity import summarize_research_run
 from mf_etl.silver.placeholders import ensure_silver_placeholder
 from mf_etl.gold.placeholders import ensure_gold_placeholder
 from mf_etl.transform.normalize import BronzeNormalizeMetadata, normalize_bronze_rows
@@ -84,6 +86,30 @@ def _parse_iso_date(value: str | None, option_name: str) -> date | None:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise typer.BadParameter(f"{option_name} must be YYYY-MM-DD.") from exc
+
+
+def _parse_int_csv(value: str, option_name: str) -> list[int]:
+    items = [part.strip() for part in value.split(",") if part.strip() != ""]
+    if not items:
+        raise typer.BadParameter(f"{option_name} must contain at least one integer.")
+    parsed: list[int] = []
+    for item in items:
+        try:
+            parsed.append(int(item))
+        except ValueError as exc:
+            raise typer.BadParameter(f"{option_name} must be comma-separated integers.") from exc
+    return parsed
+
+
+def _parse_method_csv(value: str) -> list[str]:
+    methods = [part.strip().lower() for part in value.split(",") if part.strip() != ""]
+    if not methods:
+        raise typer.BadParameter("methods must contain at least one method.")
+    allowed = {"kmeans", "gmm", "hdbscan"}
+    for method in methods:
+        if method not in allowed:
+            raise typer.BadParameter("methods must be comma-separated values from: kmeans,gmm,hdbscan")
+    return methods
 
 
 @app.command("show-config")
@@ -1336,6 +1362,234 @@ def export_ml_dataset_cmd(
     typer.echo(f"symbol_count: {result.symbol_count}")
     typer.echo(f"dataset_path: {result.dataset_path}")
     typer.echo(f"metadata_path: {result.metadata_path}")
+
+
+@app.command("research-cluster-run")
+def research_cluster_run(
+    dataset: Path = typer.Option(
+        ...,
+        "--dataset",
+        help="Path to exported ML dataset parquet.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    method: str = typer.Option(
+        "kmeans",
+        "--method",
+        help="Clustering method: kmeans, gmm, hdbscan.",
+    ),
+    n_clusters: int = typer.Option(
+        5,
+        "--n-clusters",
+        min=2,
+        help="Number of clusters/components for kmeans/gmm.",
+    ),
+    sample_frac: float | None = typer.Option(
+        None,
+        "--sample-frac",
+        help="Optional dataset sample fraction in (0,1].",
+    ),
+    date_from: str | None = typer.Option(
+        None,
+        "--date-from",
+        help="Optional date lower bound YYYY-MM-DD.",
+    ),
+    date_to: str | None = typer.Option(
+        None,
+        "--date-to",
+        help="Optional date upper bound YYYY-MM-DD.",
+    ),
+    features_preset: str = typer.Option(
+        "default",
+        "--features-preset",
+        help="Feature list preset (currently only 'default').",
+    ),
+    write_full_clustered: bool = typer.Option(
+        False,
+        "--write-full-clustered",
+        help="Write full clustered dataset parquet in run output directory.",
+    ),
+    random_state: int = typer.Option(
+        42,
+        "--random-state",
+        help="Random seed for deterministic clustering.",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run one unsupervised clustering baseline on exported Gold features dataset."""
+
+    if features_preset.strip().lower() != "default":
+        raise typer.BadParameter("Only features-preset=default is supported in v1.")
+    method_norm = method.strip().lower()
+    if method_norm not in {"kmeans", "gmm", "hdbscan"}:
+        raise typer.BadParameter("method must be one of: kmeans, gmm, hdbscan")
+
+    parsed_from = _parse_iso_date(date_from, "date-from")
+    parsed_to = _parse_iso_date(date_to, "date-to")
+    if parsed_from is not None and parsed_to is not None and parsed_from > parsed_to:
+        raise typer.BadParameter("date-from must be <= date-to.")
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = run_research_cluster(
+        settings,
+        dataset_path=dataset,
+        method=method_norm,
+        n_clusters=n_clusters,
+        sample_frac=sample_frac,
+        date_from=parsed_from,
+        date_to=parsed_to,
+        random_state=random_state,
+        write_full_clustered=write_full_clustered,
+        logger=logger,
+    )
+    run_summary = json.loads(result.run_summary_path.read_text(encoding="utf-8"))
+    metrics_payload = json.loads(result.metrics_path.read_text(encoding="utf-8"))
+    metrics = metrics_payload.get("metrics", {})
+
+    typer.echo(f"run_id: {run_summary['run_id']}")
+    typer.echo(f"rows_used: {run_summary['rows_used']}")
+    typer.echo(f"features_count: {run_summary['features_count']}")
+    typer.echo(f"method: {run_summary['method']}")
+    typer.echo(f"n_clusters_requested: {run_summary['n_clusters_requested']}")
+    typer.echo(f"silhouette: {metrics.get('silhouette')}")
+    typer.echo(f"davies_bouldin: {metrics.get('davies_bouldin')}")
+    typer.echo(f"calinski_harabasz: {metrics.get('calinski_harabasz')}")
+    typer.echo(f"bic: {metrics.get('bic')}")
+    typer.echo(f"aic: {metrics.get('aic')}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"run_summary_path: {result.run_summary_path}")
+
+
+@app.command("research-cluster-sweep")
+def research_cluster_sweep(
+    dataset: Path = typer.Option(
+        ...,
+        "--dataset",
+        help="Path to exported ML dataset parquet.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    methods: str = typer.Option(
+        "kmeans,gmm",
+        "--methods",
+        help="Comma-separated methods from kmeans,gmm,hdbscan.",
+    ),
+    n_clusters_values: str = typer.Option(
+        "4,5,6,8",
+        "--n-clusters-values",
+        help="Comma-separated cluster counts for kmeans/gmm.",
+    ),
+    sample_frac: float | None = typer.Option(
+        None,
+        "--sample-frac",
+        help="Optional dataset sample fraction in (0,1].",
+    ),
+    date_from: str | None = typer.Option(
+        None,
+        "--date-from",
+        help="Optional date lower bound YYYY-MM-DD.",
+    ),
+    date_to: str | None = typer.Option(
+        None,
+        "--date-to",
+        help="Optional date upper bound YYYY-MM-DD.",
+    ),
+    random_state: int = typer.Option(
+        42,
+        "--random-state",
+        help="Random seed for deterministic clustering.",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run a clustering sweep and write cross-model comparison artifacts."""
+
+    parsed_from = _parse_iso_date(date_from, "date-from")
+    parsed_to = _parse_iso_date(date_to, "date-to")
+    if parsed_from is not None and parsed_to is not None and parsed_from > parsed_to:
+        raise typer.BadParameter("date-from must be <= date-to.")
+
+    methods_list = _parse_method_csv(methods)
+    n_values = _parse_int_csv(n_clusters_values, "n-clusters-values")
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = run_research_cluster_sweep(
+        settings,
+        dataset_path=dataset,
+        methods=methods_list,
+        n_clusters_values=n_values,
+        sample_frac=sample_frac,
+        date_from=parsed_from,
+        date_to=parsed_to,
+        random_state=random_state,
+        logger=logger,
+    )
+
+    typer.echo(f"run_id: {result.run_id}")
+    typer.echo(f"rows: {result.rows}")
+    typer.echo(f"summary_json_path: {result.summary_json_path}")
+    typer.echo(f"summary_csv_path: {result.summary_csv_path}")
+
+
+@app.command("research-cluster-sanity")
+def research_cluster_sanity(
+    run_dir: Path = typer.Option(
+        ...,
+        "--run-dir",
+        help="Path to a research run output directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+) -> None:
+    """Inspect one research run directory and print concise diagnostics."""
+
+    summary = summarize_research_run(run_dir)
+    run_summary = summary["run_summary"]
+    metrics = summary["clustering_metrics"].get("metrics", {})
+    preprocess = summary.get("preprocess_summary", {})
+
+    typer.echo(f"run_id: {run_summary.get('run_id')}")
+    typer.echo(f"method: {run_summary.get('method')}")
+    typer.echo(f"rows_used: {run_summary.get('rows_used')}")
+    typer.echo(f"features_count: {run_summary.get('features_count')}")
+    typer.echo(f"silhouette: {metrics.get('silhouette')}")
+    typer.echo(f"davies_bouldin: {metrics.get('davies_bouldin')}")
+    typer.echo(f"calinski_harabasz: {metrics.get('calinski_harabasz')}")
+    typer.echo(f"rows_dropped_null_features: {preprocess.get('rows_dropped_null_features')}")
+    nan_summary = summary.get("forward_aggregate_nan_summary", {})
+    nan_total = sum(item.get("nan_count", 0) for item in nan_summary.values())
+    typer.echo(f"forward_aggregate_nan_total: {nan_total}")
+    typer.echo("top_clusters_by_fwd_ret_10_mean:")
+    for row in summary["top_clusters_by_fwd_ret_10_mean"]:
+        typer.echo(
+            f"cluster={row.get('cluster_id')} | rows={row.get('row_count')} | fwd_ret_10_mean={row.get('fwd_ret_10_mean')}"
+        )
+    typer.echo("top_clusters_by_flow_activity_20_mean:")
+    for row in summary["top_clusters_by_flow_activity_20_mean"]:
+        typer.echo(
+            f"cluster={row.get('cluster_id')} | rows={row.get('row_count')} | flow_activity_20_mean={row.get('flow_activity_20_mean')}"
+        )
 
 
 def main() -> None:

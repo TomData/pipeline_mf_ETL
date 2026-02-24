@@ -70,6 +70,15 @@ class ValidationConfig(BaseModel):
     gap_days_warn_threshold: int = 7
 
 
+class IndicatorsConfig(BaseModel):
+    """Indicator-layer parameterization for Silver-derived signals."""
+
+    tmf_period: int = Field(default=21, ge=1)
+    eps: float = Field(default=1e-12, gt=0.0)
+    proxy_period: int = Field(default=21, ge=1)
+    float_dtype_override: Literal["float64", "float32"] | None = None
+
+
 class AppSettings(BaseSettings):
     """Top-level application settings."""
 
@@ -80,6 +89,7 @@ class AppSettings(BaseSettings):
     precision: PrecisionConfig = Field(default_factory=PrecisionConfig)
     parquet: ParquetConfig = Field(default_factory=ParquetConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
+    indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="MF_ETL_",

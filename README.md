@@ -117,3 +117,31 @@ Silver run artifacts:
 - `artifacts/silver_run_summaries/<run_id>_silver_ticker_results.parquet`
 
 This base layer is the foundation for future TMF/TTI, event grammar, and downstream research/ML pipelines.
+
+## Indicator Layer (TMF + TTI Proxy)
+
+The first indicator layer builds on Silver base series and writes per-symbol indicator artifacts:
+
+- TMF v1 uses the public Twiggs-style true-range AD formulation with Wilder-style smoothing.
+- Twiggs Trend Index exact formula is proprietary; this project intentionally exposes a versioned proxy:
+  - `tti_proxy_v1_21`
+  - `tti_formula_status = PROXY_UNDISCLOSED_ORIGINAL`
+  - `tti_proxy_version = v1`
+
+Indicator outputs are written to:
+
+- `data/silver/indicators_by_symbol/exchange=<EXCHANGE>/prefix=<LETTER>/ticker=<TICKER>/part-000.parquet`
+
+Run commands:
+
+- `python -m mf_etl.cli indicators-one --ticker AAPL.US`
+- `python -m mf_etl.cli indicators-one --silver-file /abs/path/to/data/silver/base_series_by_symbol/.../part-000.parquet`
+- `python -m mf_etl.cli indicators-run --limit 10`
+- `python -m mf_etl.cli indicators-run`
+- `python -m mf_etl.cli indicators-sanity`
+
+Indicator artifacts:
+
+- `artifacts/indicator_run_summaries/<run_id>_indicators_run_summary.json`
+- `artifacts/indicator_run_summaries/<run_id>_indicators_ticker_results.parquet`
+- `artifacts/indicator_qa/indicator_sanity_summary.json`

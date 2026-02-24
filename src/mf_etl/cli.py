@@ -28,6 +28,13 @@ from mf_etl.silver.pipeline import (
     run_silver_pipeline,
     run_silver_sanity,
 )
+from mf_etl.silver.indicators_pipeline import (
+    IndicatorRunOptions,
+    resolve_silver_base_file_for_ticker,
+    run_indicators_one_from_silver_file,
+    run_indicators_pipeline,
+    run_indicators_sanity,
+)
 from mf_etl.silver.placeholders import ensure_silver_placeholder
 from mf_etl.gold.placeholders import ensure_gold_placeholder
 from mf_etl.transform.normalize import BronzeNormalizeMetadata, normalize_bronze_rows
@@ -761,6 +768,162 @@ def silver_sanity(
         typer.echo(f"  {feature}: {rate}")
     typer.echo("feature_columns_present:")
     typer.echo(", ".join(summary["feature_columns_present"]))
+
+
+@app.command("indicators-one")
+def indicators_one(
+    ticker: str | None = typer.Option(
+        None,
+        "--ticker",
+        help="Ticker symbol to resolve from Silver base outputs.",
+    ),
+    silver_file: Path | None = typer.Option(
+        None,
+        "--silver-file",
+        help="Direct path to a Silver base per-symbol parquet file.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Build TMF and TTI-proxy indicators for one symbol."""
+
+    if (ticker is None and silver_file is None) or (ticker is not None and silver_file is not None):
+        raise typer.BadParameter("Provide exactly one of --ticker or --silver-file.")
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    source_silver_file = silver_file
+    if source_silver_file is None:
+        source_silver_file = resolve_silver_base_file_for_ticker(settings.paths.silver_root, ticker=ticker or "")
+
+    run_id = f"indicators-one-{uuid4().hex[:12]}"
+    try:
+        result = run_indicators_one_from_silver_file(
+            source_silver_file,
+            settings,
+            run_id=run_id,
+            logger=logger,
+        )
+    except Exception as exc:
+        logger.exception("indicators_one.failed silver_file=%s ticker=%s", source_silver_file, ticker)
+        raise RuntimeError(f"indicators-one failed: {exc}") from exc
+
+    logger.info(
+        "indicators_one.summary ticker=%s exchange=%s rows_in=%s rows_out=%s output=%s",
+        result.ticker,
+        result.exchange,
+        result.rows_in,
+        result.rows_out,
+        result.indicator_path,
+    )
+    typer.echo(f"ticker: {result.ticker}")
+    typer.echo(f"exchange: {result.exchange}")
+    typer.echo(f"rows_in: {result.rows_in}")
+    typer.echo(f"rows_out: {result.rows_out}")
+    typer.echo(f"min_trade_date: {result.min_trade_date.isoformat() if result.min_trade_date else None}")
+    typer.echo(f"max_trade_date: {result.max_trade_date.isoformat() if result.max_trade_date else None}")
+    typer.echo(f"output_path: {result.indicator_path}")
+
+
+@app.command("indicators-run")
+def indicators_run(
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        min=1,
+        help="Process at most N symbols.",
+    ),
+    progress_every: int = typer.Option(
+        100,
+        "--progress-every",
+        min=1,
+        help="Log progress every N symbols.",
+    ),
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help="Reserved for future incremental mode; v1 rebuilds selected symbols.",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run TMF + TTI-proxy indicators for selected Silver base symbols."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    options = IndicatorRunOptions(limit=limit, progress_every=progress_every, full=full)
+    result = run_indicators_pipeline(settings, options=options, logger=logger)
+
+    summary = result.summary
+    typer.echo(f"run_id: {summary['run_id']}")
+    typer.echo(f"symbols_total_selected: {summary['symbols_total_selected']}")
+    typer.echo(f"symbols_success: {summary['symbols_success']}")
+    typer.echo(f"symbols_failed: {summary['symbols_failed']}")
+    typer.echo(f"rows_total: {summary['rows_total']}")
+    typer.echo(f"duration_sec: {summary['duration_sec']}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"ticker_results_path: {result.ticker_results_path}")
+
+
+@app.command("indicators-sanity")
+def indicators_sanity(
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Scan indicator outputs and report compact QA metrics."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = run_indicators_sanity(settings.paths.silver_root, settings.paths.artifacts_root, logger=logger)
+    summary = result.summary
+
+    logger.info(
+        "indicators_sanity.summary symbol_count=%s total_rows=%s min_date=%s max_date=%s read_errors=%s summary_path=%s",
+        summary["symbol_count"],
+        summary["total_rows"],
+        summary["global_min_trade_date"],
+        summary["global_max_trade_date"],
+        result.read_errors,
+        result.summary_path,
+    )
+
+    typer.echo(f"indicator_file_count: {result.indicator_file_count}")
+    typer.echo(f"symbol_count: {summary['symbol_count']}")
+    typer.echo(f"total_rows: {summary['total_rows']}")
+    typer.echo(f"global_min_trade_date: {summary['global_min_trade_date']}")
+    typer.echo(f"global_max_trade_date: {summary['global_max_trade_date']}")
+    typer.echo(f"tmf_21_null_rate: {summary['tmf_21_null_rate']}")
+    typer.echo(f"tti_proxy_v1_21_null_rate: {summary['tti_proxy_v1_21_null_rate']}")
+    typer.echo(f"tmf_zero_cross_up_count: {summary['tmf_zero_cross_up_count']}")
+    typer.echo(f"tmf_zero_cross_down_count: {summary['tmf_zero_cross_down_count']}")
+    typer.echo(f"tti_proxy_zero_cross_up_count: {summary['tti_proxy_zero_cross_up_count']}")
+    typer.echo(f"tti_proxy_zero_cross_down_count: {summary['tti_proxy_zero_cross_down_count']}")
+    typer.echo("top_20_symbols_by_max_abs_tmf_21:")
+    for row in summary["top_20_symbols_by_max_abs_tmf_21"]:
+        typer.echo(f"{row['ticker']} | max_abs_tmf_21={row['max_abs_tmf_21']}")
+    typer.echo(f"summary_path: {result.summary_path}")
 
 
 def main() -> None:

@@ -91,6 +91,32 @@ class EventGrammarConfig(BaseModel):
     eps: float = Field(default=1e-12, gt=0.0)
 
 
+class GoldFeatureScoreWeightsConfig(BaseModel):
+    """Weights used to compose long/short flow event intensity scores."""
+
+    zero: float = 1.0
+    respect: float = 2.0
+    burst: float = 2.0
+    hold: float = 1.5
+
+
+class GoldFeatureExportConfig(BaseModel):
+    """Dataset export behavior flags for experiment-ready stacked outputs."""
+
+    default_drop_null_key_features: bool = True
+
+
+class GoldFeaturesConfig(BaseModel):
+    """Gold features layer settings."""
+
+    eps: float = Field(default=1e-12, gt=0.0)
+    activity_windows: list[int] = Field(default_factory=lambda: [5, 20], min_length=1)
+    score_weights: GoldFeatureScoreWeightsConfig = Field(default_factory=GoldFeatureScoreWeightsConfig)
+    recency_clip_bars: int = Field(default=20, ge=1)
+    float_dtype_override: Literal["float64", "float32"] | None = None
+    export: GoldFeatureExportConfig = Field(default_factory=GoldFeatureExportConfig)
+
+
 class AppSettings(BaseSettings):
     """Top-level application settings."""
 
@@ -103,6 +129,7 @@ class AppSettings(BaseSettings):
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
     event_grammar: EventGrammarConfig = Field(default_factory=EventGrammarConfig)
+    gold_features: GoldFeaturesConfig = Field(default_factory=GoldFeaturesConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="MF_ETL_",

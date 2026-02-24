@@ -40,3 +40,16 @@ event_grammar:
   tmf_burst_slope_threshold: 0.05
   activity_windows: [5, 20]
   eps: 1.0e-12
+
+gold_features:
+  eps: 1.0e-12
+  activity_windows: [5, 20]
+  score_weights:
+    zero: 1.0
+    respect: 2.0
+    burst: 2.0
+    hold: 1.5
+  recency_clip_bars: 20
+  float_dtype_override: null
+  export:
+    default_drop_null_key_features: true

@@ -181,3 +181,45 @@ Gold event artifacts:
 - `artifacts/gold_event_qa/events_sanity_summary.json`
 
 These outputs feed the next stage: Gold feature sets for regime clustering, HMM, and backtest research.
+
+## Gold Features v1
+
+Gold Features v1 transforms Event Grammar outputs into compact, numeric-heavy features for clustering/HMM and backtests.
+It includes:
+
+- TMF/TTI level and slope features
+- weighted flow scores (`long_flow_score_*`, `short_flow_score_*`, `delta_flow_*`, `flow_bias_20`)
+- burst/persistence/oscillation features
+- bars-since recency transforms
+- state transition features (`state_prev`, `state_changed`, `state_run_length`, `state_transition_code`, `bs_state_change`)
+
+Per-symbol feature outputs:
+
+- `data/gold/features_by_symbol/exchange=<EXCHANGE>/prefix=<LETTER>/ticker=<TICKER>/part-000.parquet`
+
+Run commands:
+
+- `python -m mf_etl.cli features-one --ticker AAPL.US`
+- `python -m mf_etl.cli features-one --events-file /abs/path/to/data/gold/events_by_symbol/.../part-000.parquet`
+- `python -m mf_etl.cli features-run --limit 10`
+- `python -m mf_etl.cli features-run`
+- `python -m mf_etl.cli features-sanity`
+
+Feature artifacts:
+
+- `artifacts/gold_feature_run_summaries/<run_id>_features_run_summary.json`
+- `artifacts/gold_feature_run_summaries/<run_id>_features_ticker_results.parquet`
+- `artifacts/gold_feature_qa/features_sanity_summary.json`
+
+Dataset export helper:
+
+- `python -m mf_etl.cli export-ml-dataset --symbols-limit 10`
+- optional filters:
+  - `--start-date YYYY-MM-DD`
+  - `--end-date YYYY-MM-DD`
+  - `--sample-frac F`
+
+Exported datasets are written to:
+
+- `data/gold/datasets/ml_dataset_v1/<run_id>/dataset.parquet`
+- `data/gold/datasets/ml_dataset_v1/<run_id>/metadata.json`

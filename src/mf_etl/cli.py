@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import date
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
@@ -42,6 +43,14 @@ from mf_etl.gold.pipeline import (
     run_events_pipeline,
     run_events_sanity,
 )
+from mf_etl.gold.features_pipeline import (
+    GoldFeatureRunOptions,
+    export_ml_dataset,
+    resolve_events_file_for_ticker,
+    run_features_one_from_events_file,
+    run_features_pipeline,
+    run_features_sanity,
+)
 from mf_etl.silver.placeholders import ensure_silver_placeholder
 from mf_etl.gold.placeholders import ensure_gold_placeholder
 from mf_etl.transform.normalize import BronzeNormalizeMetadata, normalize_bronze_rows
@@ -66,6 +75,15 @@ def _load_and_optionally_configure_logger(
     else:
         logger = logging.getLogger("mf_etl")
     return settings, logger
+
+
+def _parse_iso_date(value: str | None, option_name: str) -> date | None:
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise typer.BadParameter(f"{option_name} must be YYYY-MM-DD.") from exc
 
 
 @app.command("show-config")
@@ -1089,6 +1107,235 @@ def events_sanity(
     for row in summary["top_20_symbols_by_tmf_respect_fail_count"]:
         typer.echo(f"{row['ticker']} | tmf_respect_fail_count={row['tmf_respect_fail_count']}")
     typer.echo(f"summary_path: {result.summary_path}")
+
+
+@app.command("features-one")
+def features_one(
+    ticker: str | None = typer.Option(
+        None,
+        "--ticker",
+        help="Ticker symbol to resolve from Gold event outputs.",
+    ),
+    events_file: Path | None = typer.Option(
+        None,
+        "--events-file",
+        help="Direct path to one Gold event parquet file.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Build Gold Features v1 for one symbol."""
+
+    if (ticker is None and events_file is None) or (ticker is not None and events_file is not None):
+        raise typer.BadParameter("Provide exactly one of --ticker or --events-file.")
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    source_events_file = events_file
+    if source_events_file is None:
+        source_events_file = resolve_events_file_for_ticker(settings.paths.gold_root, ticker=ticker or "")
+
+    run_id = f"features-one-{uuid4().hex[:12]}"
+    try:
+        result = run_features_one_from_events_file(
+            source_events_file,
+            settings,
+            run_id=run_id,
+            logger=logger,
+        )
+    except Exception as exc:
+        logger.exception("features_one.failed events_file=%s ticker=%s", source_events_file, ticker)
+        raise RuntimeError(f"features-one failed: {exc}") from exc
+
+    logger.info(
+        "features_one.summary ticker=%s exchange=%s rows_in=%s rows_out=%s output=%s",
+        result.ticker,
+        result.exchange,
+        result.rows_in,
+        result.rows_out,
+        result.output_path,
+    )
+    typer.echo(f"ticker: {result.ticker}")
+    typer.echo(f"exchange: {result.exchange}")
+    typer.echo(f"rows_in: {result.rows_in}")
+    typer.echo(f"rows_out: {result.rows_out}")
+    typer.echo(f"min_trade_date: {result.min_trade_date.isoformat() if result.min_trade_date else None}")
+    typer.echo(f"max_trade_date: {result.max_trade_date.isoformat() if result.max_trade_date else None}")
+    typer.echo(f"output_path: {result.output_path}")
+
+
+@app.command("features-run")
+def features_run(
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        min=1,
+        help="Process at most N symbols.",
+    ),
+    progress_every: int = typer.Option(
+        100,
+        "--progress-every",
+        min=1,
+        help="Log progress every N symbols.",
+    ),
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help="Reserved for future incremental mode; v1 rebuilds selected symbols.",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run batch Gold Features v1 over Gold event outputs."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    options = GoldFeatureRunOptions(limit=limit, progress_every=progress_every, full=full)
+    result = run_features_pipeline(settings, options=options, logger=logger)
+
+    summary = result.summary
+    typer.echo(f"run_id: {summary['run_id']}")
+    typer.echo(f"symbols_total_selected: {summary['symbols_total_selected']}")
+    typer.echo(f"symbols_success: {summary['symbols_success']}")
+    typer.echo(f"symbols_failed: {summary['symbols_failed']}")
+    typer.echo(f"rows_total: {summary['rows_total']}")
+    typer.echo(f"global_min_trade_date: {summary['global_min_trade_date']}")
+    typer.echo(f"global_max_trade_date: {summary['global_max_trade_date']}")
+    typer.echo(f"feature_calc_version: {summary['feature_calc_version']}")
+    typer.echo(f"duration_sec: {summary['duration_sec']}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"ticker_results_path: {result.ticker_results_path}")
+
+
+@app.command("features-sanity")
+def features_sanity(
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Scan Gold feature outputs and report compact QA metrics."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = run_features_sanity(settings.paths.gold_root, settings.paths.artifacts_root, logger=logger)
+    summary = result.summary
+
+    logger.info(
+        "features_sanity.summary symbol_count=%s total_rows=%s min_date=%s max_date=%s read_errors=%s summary_path=%s",
+        summary["symbol_count"],
+        summary["total_rows"],
+        summary["global_min_trade_date"],
+        summary["global_max_trade_date"],
+        result.read_errors,
+        result.summary_path,
+    )
+
+    typer.echo(f"feature_file_count: {result.feature_file_count}")
+    typer.echo(f"symbol_count: {summary['symbol_count']}")
+    typer.echo(f"total_rows: {summary['total_rows']}")
+    typer.echo(f"global_min_trade_date: {summary['global_min_trade_date']}")
+    typer.echo(f"global_max_trade_date: {summary['global_max_trade_date']}")
+    typer.echo(f"null_rates: {summary['null_rates']}")
+    typer.echo("top_20_symbols_by_avg_flow_activity_20:")
+    for row in summary["top_20_symbols_by_avg_flow_activity_20"]:
+        typer.echo(f"{row['ticker']} | avg_flow_activity_20={row['avg_flow_activity_20']}")
+    typer.echo("top_20_symbols_by_max_abs_delta_flow_20:")
+    for row in summary["top_20_symbols_by_max_abs_delta_flow_20"]:
+        typer.echo(f"{row['ticker']} | max_abs_delta_flow_20={row['max_abs_delta_flow_20']}")
+    typer.echo("top_20_symbols_by_avg_oscillation_index_20:")
+    for row in summary["top_20_symbols_by_avg_oscillation_index_20"]:
+        typer.echo(f"{row['ticker']} | avg_oscillation_index_20={row['avg_oscillation_index_20']}")
+    typer.echo(f"summary_path: {result.summary_path}")
+
+
+@app.command("export-ml-dataset")
+def export_ml_dataset_cmd(
+    start_date: str | None = typer.Option(
+        None,
+        "--start-date",
+        help="Optional start date filter YYYY-MM-DD.",
+    ),
+    end_date: str | None = typer.Option(
+        None,
+        "--end-date",
+        help="Optional end date filter YYYY-MM-DD.",
+    ),
+    symbols_limit: int | None = typer.Option(
+        None,
+        "--symbols-limit",
+        min=1,
+        help="Optional max number of symbols to read.",
+    ),
+    sample_frac: float | None = typer.Option(
+        None,
+        "--sample-frac",
+        help="Optional per-row sampling fraction in (0,1].",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Export stacked Gold feature dataset parquet + metadata for ML experiments."""
+
+    parsed_start = _parse_iso_date(start_date, "start-date")
+    parsed_end = _parse_iso_date(end_date, "end-date")
+    if parsed_start is not None and parsed_end is not None and parsed_start > parsed_end:
+        raise typer.BadParameter("start-date must be <= end-date.")
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    try:
+        result = export_ml_dataset(
+            settings,
+            start_date=parsed_start,
+            end_date=parsed_end,
+            symbols_limit=symbols_limit,
+            sample_frac=sample_frac,
+            logger=logger,
+        )
+    except Exception as exc:
+        logger.exception("export_ml_dataset.failed")
+        raise RuntimeError(f"export-ml-dataset failed: {exc}") from exc
+
+    logger.info(
+        "export_ml_dataset.summary run_id=%s rows=%s symbols=%s dataset=%s metadata=%s",
+        result.run_id,
+        result.row_count,
+        result.symbol_count,
+        result.dataset_path,
+        result.metadata_path,
+    )
+    typer.echo(f"run_id: {result.run_id}")
+    typer.echo(f"row_count: {result.row_count}")
+    typer.echo(f"symbol_count: {result.symbol_count}")
+    typer.echo(f"dataset_path: {result.dataset_path}")
+    typer.echo(f"metadata_path: {result.metadata_path}")
 
 
 def main() -> None:

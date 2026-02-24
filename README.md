@@ -277,3 +277,37 @@ Forward validation aggregates are computed using finite-value-only inputs (NaN/i
   3. `research-cluster-stability` for ARI robustness
   4. OOS rerun with `--split-mode time`
   5. compare train/test profiles and forward-return validation
+
+## HMM Baseline v1
+
+HMM Baseline v1 adds sequential latent-state modeling on top of Gold feature datasets.
+Unlike clustering, HMM explicitly models temporal transitions and persistence.
+
+Core commands:
+
+- `python -m mf_etl.cli research-hmm-run --dataset /abs/path/dataset.parquet --n-components 5`
+- `python -m mf_etl.cli research-hmm-run --dataset /abs/path/dataset.parquet --n-components 5 --split-mode time --train-end 2018-12-31 --scaling-scope per_ticker`
+- `python -m mf_etl.cli research-hmm-sweep --dataset /abs/path/dataset.parquet --components 4,5,6,8`
+- `python -m mf_etl.cli research-hmm-sanity --run-dir /abs/path/to/artifacts/hmm_runs/<run_dir>`
+- `python -m mf_etl.cli research-hmm-stability --dataset /abs/path/dataset.parquet --n-components 5 --seeds 5`
+
+Run artifacts (per HMM run):
+
+- `artifacts/hmm_runs/<run_id>_hmm_<dataset_tag>/run_summary.json`
+- `artifacts/hmm_runs/<run_id>_hmm_<dataset_tag>/split_summary.json`
+- `artifacts/hmm_runs/<run_id>_hmm_<dataset_tag>/hmm_model_meta.json`
+- `artifacts/hmm_runs/<run_id>_hmm_<dataset_tag>/decoded_rows.parquet`
+- `artifacts/hmm_runs/<run_id>_hmm_<dataset_tag>/hmm_state_profile.parquet`
+- `artifacts/hmm_runs/<run_id>_hmm_<dataset_tag>/transition_matrix.csv`
+- `artifacts/hmm_runs/<run_id>_hmm_<dataset_tag>/transition_counts.csv`
+- `artifacts/hmm_runs/<run_id>_hmm_<dataset_tag>/dwell_stats.csv`
+- `artifacts/hmm_runs/<run_id>_hmm_<dataset_tag>/state_frequency.csv`
+- `artifacts/hmm_runs/<run_id>_hmm_<dataset_tag>/hmm_vs_flow_state_crosstab.csv`
+- `artifacts/hmm_runs/<run_id>_hmm_<dataset_tag>/robustness_summary.json`
+
+Recommended sequence before advanced sequential modeling:
+
+1. clustering baseline + robustness sweep
+2. HMM baseline run
+3. compare HMM states vs deterministic flow states and cluster labels
+4. iterate feature set/event grammar and rerun HMM sweep/stability

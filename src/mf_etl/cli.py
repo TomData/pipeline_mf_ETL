@@ -57,6 +57,12 @@ from mf_etl.research.pipeline import (
     run_research_cluster_sweep,
 )
 from mf_etl.research.sanity import summarize_research_run
+from mf_etl.research_hmm.pipeline import (
+    run_hmm_baseline,
+    run_hmm_stability,
+    run_hmm_sweep,
+)
+from mf_etl.research_hmm.sanity import summarize_hmm_run
 from mf_etl.silver.placeholders import ensure_silver_placeholder
 from mf_etl.gold.placeholders import ensure_gold_placeholder
 from mf_etl.transform.normalize import BronzeNormalizeMetadata, normalize_bronze_rows
@@ -1914,6 +1920,520 @@ def research_cluster_stability(
     typer.echo(f"output_dir: {result.output_dir}")
     typer.echo(f"stability_summary_path: {result.stability_summary_path}")
     typer.echo(f"stability_by_seed_path: {result.stability_by_seed_path}")
+    typer.echo(f"pairwise_ari_path: {result.pairwise_ari_path}")
+
+
+@app.command("research-hmm-run")
+def research_hmm_run(
+    dataset: Path = typer.Option(
+        ...,
+        "--dataset",
+        help="Path to exported ML dataset parquet.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    n_components: int | None = typer.Option(
+        None,
+        "--n-components",
+        min=2,
+        help="Gaussian HMM component count (defaults to config).",
+    ),
+    covariance_type: str | None = typer.Option(
+        None,
+        "--covariance-type",
+        help="Optional covariance type override: diag, full, tied, spherical.",
+    ),
+    n_iter: int | None = typer.Option(
+        None,
+        "--n-iter",
+        min=1,
+        help="Optional HMM max iterations override.",
+    ),
+    tol: float | None = typer.Option(
+        None,
+        "--tol",
+        help="Optional HMM convergence tolerance override.",
+    ),
+    random_state: int | None = typer.Option(
+        None,
+        "--random-state",
+        help="Optional random seed override.",
+    ),
+    sample_frac: float | None = typer.Option(
+        None,
+        "--sample-frac",
+        help="Optional dataset sample fraction in (0,1].",
+    ),
+    date_from: str | None = typer.Option(
+        None,
+        "--date-from",
+        help="Optional date lower bound YYYY-MM-DD.",
+    ),
+    date_to: str | None = typer.Option(
+        None,
+        "--date-to",
+        help="Optional date upper bound YYYY-MM-DD.",
+    ),
+    split_mode: str | None = typer.Option(
+        None,
+        "--split-mode",
+        help="Split mode override: none or time.",
+    ),
+    train_end: str | None = typer.Option(
+        None,
+        "--train-end",
+        help="Train end date YYYY-MM-DD when split-mode=time.",
+    ),
+    test_start: str | None = typer.Option(
+        None,
+        "--test-start",
+        help="Optional test start date YYYY-MM-DD.",
+    ),
+    test_end: str | None = typer.Option(
+        None,
+        "--test-end",
+        help="Optional test end date YYYY-MM-DD.",
+    ),
+    fit_on: str = typer.Option(
+        "train",
+        "--fit-on",
+        help="Fit scope: train or all.",
+    ),
+    predict_on: str | None = typer.Option(
+        None,
+        "--predict-on",
+        help="Predict/decode scope: train, test, or all.",
+    ),
+    scaler: str | None = typer.Option(
+        None,
+        "--scaler",
+        help="Optional scaler override: standard or robust.",
+    ),
+    scaling_scope: str | None = typer.Option(
+        None,
+        "--scaling-scope",
+        help="Scaling scope override: global or per_ticker.",
+    ),
+    cluster_labels_file: Path | None = typer.Option(
+        None,
+        "--cluster-labels-file",
+        help="Optional cluster labels parquet/csv for overlap metrics.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    write_full_decoded_csv: bool = typer.Option(
+        False,
+        "--write-full-decoded-csv",
+        help="Also write full decoded rows CSV (can be large).",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run Gaussian HMM baseline with optional OOS split and diagnostics artifacts."""
+
+    parsed_from = _parse_iso_date(date_from, "date-from")
+    parsed_to = _parse_iso_date(date_to, "date-to")
+    if parsed_from is not None and parsed_to is not None and parsed_from > parsed_to:
+        raise typer.BadParameter("date-from must be <= date-to.")
+    parsed_train_end = _parse_iso_date(train_end, "train-end")
+    parsed_test_start = _parse_iso_date(test_start, "test-start")
+    parsed_test_end = _parse_iso_date(test_end, "test-end")
+    if parsed_test_start is not None and parsed_test_end is not None and parsed_test_start > parsed_test_end:
+        raise typer.BadParameter("test-start must be <= test-end.")
+
+    split_mode_norm = _normalize_choice(split_mode, allowed={"none", "time"}, option_name="split-mode")
+    fit_on_norm = _normalize_choice(fit_on, allowed={"train", "all"}, option_name="fit-on")
+    predict_on_norm = _normalize_choice(predict_on, allowed={"train", "test", "all"}, option_name="predict-on")
+    scaler_norm = _normalize_choice(scaler, allowed={"standard", "robust"}, option_name="scaler")
+    scaling_scope_norm = _normalize_choice(
+        scaling_scope,
+        allowed={"global", "per_ticker"},
+        option_name="scaling-scope",
+    )
+    covariance_type_norm = _normalize_choice(
+        covariance_type,
+        allowed={"diag", "full", "tied", "spherical"},
+        option_name="covariance-type",
+    )
+    if split_mode_norm == "time" and parsed_train_end is None:
+        raise typer.BadParameter("train-end is required when split-mode=time.")
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    resolved_components = (
+        n_components if n_components is not None else settings.research_hmm.hmm.n_components_default
+    )
+    result = run_hmm_baseline(
+        settings,
+        dataset_path=dataset,
+        n_components=resolved_components,
+        covariance_type=covariance_type_norm,
+        n_iter=n_iter,
+        tol=tol,
+        random_state=random_state,
+        sample_frac=sample_frac,
+        date_from=parsed_from,
+        date_to=parsed_to,
+        split_mode=split_mode_norm,
+        train_end=parsed_train_end,
+        test_start=parsed_test_start,
+        test_end=parsed_test_end,
+        fit_on=fit_on_norm or "train",
+        predict_on=predict_on_norm,
+        scaler=scaler_norm,
+        scaling_scope=scaling_scope_norm,
+        cluster_labels_file=cluster_labels_file,
+        write_full_decoded_csv=write_full_decoded_csv,
+        logger=logger,
+    )
+    summary = json.loads(result.run_summary_path.read_text(encoding="utf-8"))
+    typer.echo(f"run_id: {summary.get('run_id')}")
+    typer.echo(f"rows_decoded: {summary.get('rows_decoded')}")
+    typer.echo(f"n_components: {summary.get('n_components')}")
+    typer.echo(f"split_mode: {summary.get('split_mode')}")
+    typer.echo(f"fit_on: {summary.get('fit_on')}")
+    typer.echo(f"predict_on: {summary.get('predict_on')}")
+    typer.echo(f"scaler: {summary.get('scaler')}")
+    typer.echo(f"scaling_scope: {summary.get('scaling_scope')}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"run_summary_path: {result.run_summary_path}")
+
+
+@app.command("research-hmm-sweep")
+def research_hmm_sweep(
+    dataset: Path = typer.Option(
+        ...,
+        "--dataset",
+        help="Path to exported ML dataset parquet.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    components: str | None = typer.Option(
+        None,
+        "--components",
+        help="Comma-separated component counts, e.g. 4,5,6,8. Defaults to config.",
+    ),
+    sample_frac: float | None = typer.Option(
+        None,
+        "--sample-frac",
+        help="Optional dataset sample fraction in (0,1].",
+    ),
+    date_from: str | None = typer.Option(
+        None,
+        "--date-from",
+        help="Optional date lower bound YYYY-MM-DD.",
+    ),
+    date_to: str | None = typer.Option(
+        None,
+        "--date-to",
+        help="Optional date upper bound YYYY-MM-DD.",
+    ),
+    split_mode: str | None = typer.Option(
+        None,
+        "--split-mode",
+        help="Split mode override: none or time.",
+    ),
+    train_end: str | None = typer.Option(
+        None,
+        "--train-end",
+        help="Train end date YYYY-MM-DD when split-mode=time.",
+    ),
+    test_start: str | None = typer.Option(
+        None,
+        "--test-start",
+        help="Optional test start date YYYY-MM-DD.",
+    ),
+    test_end: str | None = typer.Option(
+        None,
+        "--test-end",
+        help="Optional test end date YYYY-MM-DD.",
+    ),
+    fit_on: str = typer.Option(
+        "train",
+        "--fit-on",
+        help="Fit scope: train or all.",
+    ),
+    predict_on: str | None = typer.Option(
+        None,
+        "--predict-on",
+        help="Predict/decode scope: train, test, or all.",
+    ),
+    scaler: str | None = typer.Option(
+        None,
+        "--scaler",
+        help="Optional scaler override: standard or robust.",
+    ),
+    scaling_scope: str | None = typer.Option(
+        None,
+        "--scaling-scope",
+        help="Scaling scope override: global or per_ticker.",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run HMM across multiple component counts and write summary artifacts."""
+
+    parsed_from = _parse_iso_date(date_from, "date-from")
+    parsed_to = _parse_iso_date(date_to, "date-to")
+    if parsed_from is not None and parsed_to is not None and parsed_from > parsed_to:
+        raise typer.BadParameter("date-from must be <= date-to.")
+    parsed_train_end = _parse_iso_date(train_end, "train-end")
+    parsed_test_start = _parse_iso_date(test_start, "test-start")
+    parsed_test_end = _parse_iso_date(test_end, "test-end")
+    if parsed_test_start is not None and parsed_test_end is not None and parsed_test_start > parsed_test_end:
+        raise typer.BadParameter("test-start must be <= test-end.")
+
+    split_mode_norm = _normalize_choice(split_mode, allowed={"none", "time"}, option_name="split-mode")
+    fit_on_norm = _normalize_choice(fit_on, allowed={"train", "all"}, option_name="fit-on")
+    predict_on_norm = _normalize_choice(predict_on, allowed={"train", "test", "all"}, option_name="predict-on")
+    scaler_norm = _normalize_choice(scaler, allowed={"standard", "robust"}, option_name="scaler")
+    scaling_scope_norm = _normalize_choice(
+        scaling_scope,
+        allowed={"global", "per_ticker"},
+        option_name="scaling-scope",
+    )
+    if split_mode_norm == "time" and parsed_train_end is None:
+        raise typer.BadParameter("train-end is required when split-mode=time.")
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    if components is None:
+        component_values = settings.research_hmm.sweep.components_default
+    else:
+        component_values = _parse_int_csv(components, "components")
+    result = run_hmm_sweep(
+        settings,
+        dataset_path=dataset,
+        components=component_values,
+        sample_frac=sample_frac,
+        date_from=parsed_from,
+        date_to=parsed_to,
+        split_mode=split_mode_norm,
+        train_end=parsed_train_end,
+        test_start=parsed_test_start,
+        test_end=parsed_test_end,
+        fit_on=fit_on_norm or "train",
+        predict_on=predict_on_norm,
+        scaler=scaler_norm,
+        scaling_scope=scaling_scope_norm,
+        logger=logger,
+    )
+    typer.echo(f"run_id: {result.run_id}")
+    typer.echo(f"rows: {result.rows}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"summary_json_path: {result.summary_json_path}")
+    typer.echo(f"summary_csv_path: {result.summary_csv_path}")
+
+
+@app.command("research-hmm-sanity")
+def research_hmm_sanity(
+    run_dir: Path = typer.Option(
+        ...,
+        "--run-dir",
+        help="Path to one HMM run output directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+) -> None:
+    """Inspect a completed HMM run and print concise diagnostics."""
+
+    summary = summarize_hmm_run(run_dir)
+    run_summary = summary["run_summary"]
+    typer.echo(f"run_id: {run_summary.get('run_id')}")
+    typer.echo(f"rows_decoded: {run_summary.get('rows_decoded')}")
+    typer.echo(f"n_components: {run_summary.get('n_components')}")
+    typer.echo(f"split_mode: {run_summary.get('split_mode')}")
+    typer.echo(f"state_count: {summary.get('state_count')}")
+    nan_summary = summary.get("forward_aggregate_nan_summary", {})
+    nan_total = sum(item.get("nan_count", 0) for item in nan_summary.values())
+    typer.echo(f"forward_aggregate_nan_total: {nan_total}")
+    typer.echo("top_states_by_fwd_ret_10_mean:")
+    for row in summary.get("top_states_by_fwd_ret_10_mean", [])[:10]:
+        typer.echo(
+            f"state={row.get('hmm_state')} | rows={row.get('row_count')} | fwd_ret_10_mean={row.get('fwd_ret_10_mean')}"
+        )
+    typer.echo("top_self_transition_probs:")
+    for row in summary.get("top_self_transition_probs", [])[:10]:
+        typer.echo(f"state={row.get('state')} | self_prob={row.get('transition_probability')}")
+
+
+@app.command("research-hmm-stability")
+def research_hmm_stability(
+    dataset: Path = typer.Option(
+        ...,
+        "--dataset",
+        help="Path to exported ML dataset parquet.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    n_components: int | None = typer.Option(
+        None,
+        "--n-components",
+        min=2,
+        help="Gaussian HMM component count (defaults to config).",
+    ),
+    seeds: int | None = typer.Option(
+        None,
+        "--seeds",
+        min=1,
+        help="Number of seeds to evaluate (defaults to config).",
+    ),
+    seed_start: int | None = typer.Option(
+        None,
+        "--seed-start",
+        help="Seed range starting value (defaults to config).",
+    ),
+    sample_frac: float | None = typer.Option(
+        None,
+        "--sample-frac",
+        help="Optional dataset sample fraction in (0,1].",
+    ),
+    date_from: str | None = typer.Option(
+        None,
+        "--date-from",
+        help="Optional date lower bound YYYY-MM-DD.",
+    ),
+    date_to: str | None = typer.Option(
+        None,
+        "--date-to",
+        help="Optional date upper bound YYYY-MM-DD.",
+    ),
+    split_mode: str | None = typer.Option(
+        None,
+        "--split-mode",
+        help="Split mode override: none or time.",
+    ),
+    train_end: str | None = typer.Option(
+        None,
+        "--train-end",
+        help="Train end date YYYY-MM-DD when split-mode=time.",
+    ),
+    test_start: str | None = typer.Option(
+        None,
+        "--test-start",
+        help="Optional test start date YYYY-MM-DD.",
+    ),
+    test_end: str | None = typer.Option(
+        None,
+        "--test-end",
+        help="Optional test end date YYYY-MM-DD.",
+    ),
+    fit_on: str = typer.Option(
+        "train",
+        "--fit-on",
+        help="Fit scope: train or all.",
+    ),
+    predict_on: str | None = typer.Option(
+        None,
+        "--predict-on",
+        help="Predict/decode scope: train, test, or all.",
+    ),
+    scaler: str | None = typer.Option(
+        None,
+        "--scaler",
+        help="Optional scaler override: standard or robust.",
+    ),
+    scaling_scope: str | None = typer.Option(
+        None,
+        "--scaling-scope",
+        help="Scaling scope override: global or per_ticker.",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run HMM across multiple seeds and write ARI-based stability artifacts."""
+
+    parsed_from = _parse_iso_date(date_from, "date-from")
+    parsed_to = _parse_iso_date(date_to, "date-to")
+    if parsed_from is not None and parsed_to is not None and parsed_from > parsed_to:
+        raise typer.BadParameter("date-from must be <= date-to.")
+    parsed_train_end = _parse_iso_date(train_end, "train-end")
+    parsed_test_start = _parse_iso_date(test_start, "test-start")
+    parsed_test_end = _parse_iso_date(test_end, "test-end")
+    if parsed_test_start is not None and parsed_test_end is not None and parsed_test_start > parsed_test_end:
+        raise typer.BadParameter("test-start must be <= test-end.")
+
+    split_mode_norm = _normalize_choice(split_mode, allowed={"none", "time"}, option_name="split-mode")
+    fit_on_norm = _normalize_choice(fit_on, allowed={"train", "all"}, option_name="fit-on")
+    predict_on_norm = _normalize_choice(predict_on, allowed={"train", "test", "all"}, option_name="predict-on")
+    scaler_norm = _normalize_choice(scaler, allowed={"standard", "robust"}, option_name="scaler")
+    scaling_scope_norm = _normalize_choice(
+        scaling_scope,
+        allowed={"global", "per_ticker"},
+        option_name="scaling-scope",
+    )
+    if split_mode_norm == "time" and parsed_train_end is None:
+        raise typer.BadParameter("train-end is required when split-mode=time.")
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    resolved_components = (
+        n_components if n_components is not None else settings.research_hmm.hmm.n_components_default
+    )
+    resolved_seeds = seeds if seeds is not None else settings.research_hmm.stability.seeds_default
+    resolved_seed_start = (
+        seed_start if seed_start is not None else settings.research_hmm.stability.seed_start_default
+    )
+    result = run_hmm_stability(
+        settings,
+        dataset_path=dataset,
+        n_components=resolved_components,
+        seeds=resolved_seeds,
+        seed_start=resolved_seed_start,
+        sample_frac=sample_frac,
+        date_from=parsed_from,
+        date_to=parsed_to,
+        split_mode=split_mode_norm,
+        train_end=parsed_train_end,
+        test_start=parsed_test_start,
+        test_end=parsed_test_end,
+        fit_on=fit_on_norm or "train",
+        predict_on=predict_on_norm,
+        scaler=scaler_norm,
+        scaling_scope=scaling_scope_norm,
+        logger=logger,
+    )
+    summary = json.loads(result.summary_json_path.read_text(encoding="utf-8"))
+    ari = summary.get("ari_summary", {})
+    typer.echo(f"run_id: {summary.get('run_id')}")
+    typer.echo(f"n_components: {summary.get('n_components')}")
+    typer.echo(f"seeds: {summary.get('seeds')}")
+    typer.echo(f"split_mode: {summary.get('split_mode')}")
+    typer.echo(f"fit_on: {summary.get('fit_on')}")
+    typer.echo(f"predict_on: {summary.get('predict_on')}")
+    typer.echo(f"ari_mean: {ari.get('ari_mean')}")
+    typer.echo(f"ari_median: {ari.get('ari_median')}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"summary_json_path: {result.summary_json_path}")
+    typer.echo(f"by_seed_path: {result.by_seed_path}")
     typer.echo(f"pairwise_ari_path: {result.pairwise_ari_path}")
 
 

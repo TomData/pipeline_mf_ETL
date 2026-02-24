@@ -148,6 +148,71 @@ class ResearchStabilityConfig(BaseModel):
     seed_start_default: int = 42
 
 
+class ResearchHMMModelConfig(BaseModel):
+    """Core Gaussian HMM defaults."""
+
+    n_components_default: int = Field(default=5, ge=2)
+    covariance_type: Literal["diag", "full", "tied", "spherical"] = "diag"
+    n_iter: int = Field(default=200, ge=1)
+    tol: float = Field(default=1e-3, gt=0.0)
+    random_state: int = 42
+
+
+class ResearchHMMSweepConfig(BaseModel):
+    """Default component grids for HMM sweep runs."""
+
+    components_default: list[int] = Field(default_factory=lambda: [4, 5, 6, 8], min_length=1)
+
+
+class ResearchHMMStabilityConfig(BaseModel):
+    """Default seed settings for HMM stability runs."""
+
+    seeds_default: int = Field(default=5, ge=1)
+    seed_start_default: int = 42
+
+
+class ResearchHMMConfig(BaseModel):
+    """Sequential HMM baseline configuration."""
+
+    default_feature_list: list[str] = Field(
+        default_factory=lambda: [
+            "tmf_21",
+            "tmf_abs",
+            "tmf_slope_1",
+            "tmf_slope_5",
+            "tmf_slope_10",
+            "tmf_curvature_1",
+            "tti_proxy_v1_21",
+            "tti_proxy_slope_1",
+            "tti_proxy_slope_5",
+            "long_flow_score_20",
+            "short_flow_score_20",
+            "delta_flow_20",
+            "flow_activity_20",
+            "flow_bias_20",
+            "long_burst_20",
+            "short_burst_20",
+            "persistence_pos_20",
+            "persistence_neg_20",
+            "oscillation_index_20",
+            "respect_fail_balance_20",
+            "rec_tmf_zero_up_20",
+            "rec_tmf_zero_down_20",
+            "rec_tmf_burst_up_20",
+            "rec_tmf_burst_down_20",
+            "state_run_length",
+        ],
+        min_length=1,
+    )
+    scaler: Literal["standard", "robust"] = "standard"
+    scaling_scope_default: Literal["global", "per_ticker"] = "global"
+    split_mode_default: Literal["none", "time"] = "none"
+    min_sequence_length: int = Field(default=100, ge=1)
+    hmm: ResearchHMMModelConfig = Field(default_factory=ResearchHMMModelConfig)
+    sweep: ResearchHMMSweepConfig = Field(default_factory=ResearchHMMSweepConfig)
+    stability: ResearchHMMStabilityConfig = Field(default_factory=ResearchHMMStabilityConfig)
+
+
 class ResearchClusteringConfig(BaseModel):
     """Research clustering defaults for unsupervised baseline pipeline."""
 
@@ -208,6 +273,7 @@ class AppSettings(BaseSettings):
     event_grammar: EventGrammarConfig = Field(default_factory=EventGrammarConfig)
     gold_features: GoldFeaturesConfig = Field(default_factory=GoldFeaturesConfig)
     research_clustering: ResearchClusteringConfig = Field(default_factory=ResearchClusteringConfig)
+    research_hmm: ResearchHMMConfig = Field(default_factory=ResearchHMMConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="MF_ETL_",

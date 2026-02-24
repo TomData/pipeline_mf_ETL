@@ -102,3 +102,46 @@ research_clustering:
     reg_covar: 1.0e-6
     max_iter: 200
   forward_windows: [5, 10, 20]
+
+research_hmm:
+  default_feature_list:
+    - tmf_21
+    - tmf_abs
+    - tmf_slope_1
+    - tmf_slope_5
+    - tmf_slope_10
+    - tmf_curvature_1
+    - tti_proxy_v1_21
+    - tti_proxy_slope_1
+    - tti_proxy_slope_5
+    - long_flow_score_20
+    - short_flow_score_20
+    - delta_flow_20
+    - flow_activity_20
+    - flow_bias_20
+    - long_burst_20
+    - short_burst_20
+    - persistence_pos_20
+    - persistence_neg_20
+    - oscillation_index_20
+    - respect_fail_balance_20
+    - rec_tmf_zero_up_20
+    - rec_tmf_zero_down_20
+    - rec_tmf_burst_up_20
+    - rec_tmf_burst_down_20
+    - state_run_length
+  scaler: standard
+  scaling_scope_default: global
+  split_mode_default: none
+  min_sequence_length: 100
+  hmm:
+    n_components_default: 5
+    covariance_type: diag
+    n_iter: 200
+    tol: 1.0e-3
+    random_state: 42
+  sweep:
+    components_default: [4, 5, 6, 8]
+  stability:
+    seeds_default: 5
+    seed_start_default: 42

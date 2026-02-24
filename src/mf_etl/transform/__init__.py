@@ -9,7 +9,7 @@ from mf_etl.transform.dtypes import (
     SILVER_SCHEMA_VERSION,
     dtype_for_precision_name,
 )
-from mf_etl.transform.normalize import normalize_ohlcv
+from mf_etl.transform.normalize import BronzeNormalizeMetadata, normalize_bronze_rows, normalize_ohlcv
 
 __all__ = [
     "BRONZE_FLOAT_DTYPE",
@@ -19,5 +19,7 @@ __all__ = [
     "SILVER_SCHEMA_VERSION",
     "GOLD_SCHEMA_VERSION",
     "dtype_for_precision_name",
+    "BronzeNormalizeMetadata",
+    "normalize_bronze_rows",
     "normalize_ohlcv",
 ]

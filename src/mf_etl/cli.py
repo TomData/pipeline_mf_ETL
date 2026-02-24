@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from uuid import uuid4
 
+import polars as pl
 import typer
 import yaml
 
 from mf_etl.config import AppSettings, load_settings
-from mf_etl.ingest.discover import discover_txt_files
+from mf_etl.ingest.discover import discover_txt_files, infer_exchange_from_path
 from mf_etl.ingest.manifest import build_manifest, write_manifest_parquet
+from mf_etl.ingest.read_txt import read_stock_txt_with_rejects
 from mf_etl.logging_utils import configure_logging
 from mf_etl.silver.placeholders import ensure_silver_placeholder
 from mf_etl.gold.placeholders import ensure_gold_placeholder
+from mf_etl.transform.normalize import BronzeNormalizeMetadata, normalize_bronze_rows
 from mf_etl.utils.paths import ensure_directories
 
 app = typer.Typer(
@@ -160,6 +164,83 @@ def discover_files(
     logger.info("discover_files.preview_first_10\n%s", manifest.head(10))
     logger.info("discover_files.output_path %s", manifest_path)
     typer.echo(f"Manifest written: {manifest_path}")
+
+
+@app.command("parse-sample")
+def parse_sample(
+    file: Path = typer.Option(
+        ...,
+        "--file",
+        help="Path to one source TXT file.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    exchange: str | None = typer.Option(
+        None,
+        "--exchange",
+        help="Exchange label override (for example: NASDAQ, NYSE).",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Parse and normalize one source TXT file for Bronze readiness checks."""
+
+    _, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    inferred_exchange = infer_exchange_from_path(file, logger=logger)
+    selected_exchange = exchange.strip().upper() if exchange else inferred_exchange
+    run_id = f"parse-sample-{uuid4().hex[:12]}"
+    metadata = BronzeNormalizeMetadata.build(
+        source_file=file,
+        exchange=selected_exchange,
+        run_id=run_id,
+    )
+
+    raw_result = read_stock_txt_with_rejects(file, logger=logger)
+    normalized = normalize_bronze_rows(raw_result.data, metadata=metadata)
+
+    min_trade_date: str | None = None
+    max_trade_date: str | None = None
+    if normalized.height > 0:
+        date_bounds = normalized.select(
+            [
+                pl.col("trade_date").min().alias("min_trade_date"),
+                pl.col("trade_date").max().alias("max_trade_date"),
+            ]
+        ).to_dicts()[0]
+        min_value = date_bounds["min_trade_date"]
+        max_value = date_bounds["max_trade_date"]
+        min_trade_date = min_value.isoformat() if min_value is not None else None
+        max_trade_date = max_value.isoformat() if max_value is not None else None
+
+    logger.info(
+        "parse_sample.summary file=%s exchange=%s raw_rows=%s normalized_rows=%s rejected_rows=%s header_skipped=%s delimiter=%s",
+        file,
+        selected_exchange,
+        raw_result.data.height,
+        normalized.height,
+        raw_result.rejects.height,
+        raw_result.skipped_header,
+        raw_result.delimiter,
+    )
+    if raw_result.rejects.height > 0:
+        logger.warning("parse_sample.reject_preview\n%s", raw_result.rejects.head(5))
+
+    typer.echo(f"raw_row_count: {raw_result.data.height}")
+    typer.echo(f"normalized_row_count: {normalized.height}")
+    typer.echo(f"schema: {normalized.schema}")
+    typer.echo("first_5_rows:")
+    typer.echo(str(normalized.head(5)))
+    typer.echo(f"min_trade_date: {min_trade_date}")
+    typer.echo(f"max_trade_date: {max_trade_date}")
 
 
 def main() -> None:

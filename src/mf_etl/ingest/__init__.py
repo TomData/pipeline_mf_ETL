@@ -7,7 +7,7 @@ from mf_etl.ingest.discover import (
     infer_exchange_from_path,
 )
 from mf_etl.ingest.manifest import build_manifest, write_manifest_parquet
-from mf_etl.ingest.read_txt import read_stock_txt
+from mf_etl.ingest.read_txt import TxtReadResult, read_stock_txt, read_stock_txt_with_rejects
 
 __all__ = [
     "DiscoveredFile",
@@ -16,5 +16,7 @@ __all__ = [
     "extract_ticker_hint",
     "build_manifest",
     "write_manifest_parquet",
+    "TxtReadResult",
     "read_stock_txt",
+    "read_stock_txt_with_rejects",
 ]

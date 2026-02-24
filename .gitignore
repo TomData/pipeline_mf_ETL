@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+.venv-etl/
+.venv-ml/
+
+# Local env/config secrets
+.env
+
+# Generated data
+data/bronze/
+data/silver/
+data/gold/
+artifacts/
+logs/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

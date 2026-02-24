@@ -1,0 +1,22 @@
+project:
+  name: mf_etl
+  env: dev
+
+paths:
+  raw_root: /media/tom/Hdd_240GB/data
+  data_root: ./data
+  bronze_root: ./data/bronze
+  silver_root: ./data/silver
+  gold_root: ./data/gold
+  artifacts_root: ./artifacts
+  logs_root: ./logs
+
+precision:
+  bronze_float: float64
+  silver_float: float32
+  gold_float: float32
+
+parquet:
+  compression: zstd
+  compression_level: 3
+  statistics: true

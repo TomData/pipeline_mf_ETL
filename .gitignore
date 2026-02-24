@@ -26,3 +26,15 @@ logs/
 .DS_Store
 .vscode/
 .idea/
+
+# other
+.venv/
+.venv-etl/
+.venv-ml/
+data/bronze/
+data/silver/
+data/gold/
+artifacts/
+logs/
+__pycache__/
+*.pyc

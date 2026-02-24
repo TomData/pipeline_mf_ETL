@@ -64,3 +64,22 @@ After `init-placeholders`, the project layout includes:
 - Stable manifest promotion to `data/bronze/manifests/file_manifest.parquet` occurs only for non-dry, non-limited, non-filtered runs.
 - Per-file processing failures are logged and captured in run summary artifacts, while the run continues.
 - Stable manifest is still promoted when such a full run reaches completion, even with per-file failures.
+
+## Bronze QA Utilities
+
+- Build symbol master:
+  - `python -m mf_etl.cli build-symbol-master`
+  - Writes:
+    - `data/bronze/symbol_master/symbol_master.parquet`
+    - `data/bronze/symbol_master/symbol_master.csv`
+
+- Run global sanity checks:
+  - `python -m mf_etl.cli sanity-checks`
+  - Writes:
+    - `artifacts/bronze_qa/bronze_sanity_summary.json`
+    - `artifacts/bronze_qa/bronze_sanity_by_exchange.parquet` (and csv)
+    - `artifacts/bronze_qa/bronze_rows_by_year.parquet` (and csv)
+
+- List problematic tickers:
+  - `python -m mf_etl.cli list-problem-tickers --limit 50`
+  - `python -m mf_etl.cli list-problem-tickers --only-invalid`

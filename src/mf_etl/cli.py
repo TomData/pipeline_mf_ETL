@@ -13,6 +13,8 @@ import typer
 import yaml
 
 from mf_etl.bronze.pipeline import BronzeRunOptions, run_bronze_pipeline
+from mf_etl.bronze.sanity_checks import run_bronze_sanity_checks
+from mf_etl.bronze.symbol_master import build_and_write_symbol_master, symbol_master_paths
 from mf_etl.bronze.writer import write_bronze_artifacts
 from mf_etl.config import AppSettings, load_settings
 from mf_etl.ingest.discover import discover_txt_files, extract_ticker_hint, infer_exchange_from_path
@@ -167,6 +169,138 @@ def init_placeholders(
     logger.info("init_placeholders.created_dirs count=%s", len(created_dirs))
     logger.info("init_placeholders.marker_files silver=%s gold=%s", silver_readme, gold_readme)
     typer.echo("Initialized data/artifacts/logs folders and silver/gold marker files.")
+
+
+@app.command("build-symbol-master")
+def build_symbol_master_cmd(
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Build symbol-master artifacts from Bronze parquet outputs."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = build_and_write_symbol_master(settings.paths.bronze_root, logger=logger)
+
+    logger.info(
+        "build_symbol_master.summary rows=%s bronze_files=%s read_errors=%s quality_reports_total_files=%s parquet=%s csv=%s",
+        result.symbol_master_df.height,
+        result.bronze_file_count,
+        result.bronze_files_read_errors,
+        result.quality_reports_total_files,
+        result.parquet_path,
+        result.csv_path,
+    )
+
+    typer.echo(f"symbol_count: {result.symbol_master_df.height}")
+    typer.echo(f"bronze_file_count: {result.bronze_file_count}")
+    typer.echo(f"bronze_read_errors: {result.bronze_files_read_errors}")
+    typer.echo(f"quality_reports_total_files: {result.quality_reports_total_files}")
+    typer.echo(f"symbol_master_parquet: {result.parquet_path}")
+    typer.echo(f"symbol_master_csv: {result.csv_path}")
+
+
+@app.command("sanity-checks")
+def sanity_checks_cmd(
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run global Bronze QA sanity checks and write QA artifacts."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    symbol_master_parquet, _ = symbol_master_paths(settings.paths.bronze_root)
+    symbol_master_df: pl.DataFrame | None = None
+
+    if not symbol_master_parquet.exists():
+        logger.info("sanity_checks.symbol_master_missing path=%s; building symbol master first", symbol_master_parquet)
+        build_result = build_and_write_symbol_master(settings.paths.bronze_root, logger=logger)
+        symbol_master_df = build_result.symbol_master_df
+
+    sanity_result = run_bronze_sanity_checks(
+        settings.paths.bronze_root,
+        settings.paths.artifacts_root,
+        symbol_master_df=symbol_master_df,
+        logger=logger,
+    )
+    summary = sanity_result.summary
+
+    logger.info(
+        "sanity_checks.summary ticker_count=%s total_rows=%s total_warn_rows=%s total_invalid_rows=%s summary_path=%s",
+        summary["ticker_count"],
+        summary["total_rows"],
+        summary["total_warn_rows"],
+        summary["total_invalid_rows"],
+        sanity_result.summary_path,
+    )
+
+    typer.echo(f"ticker_count: {summary['ticker_count']}")
+    typer.echo(f"total_rows: {summary['total_rows']}")
+    typer.echo(f"global_min_trade_date: {summary['global_min_trade_date']}")
+    typer.echo(f"global_max_trade_date: {summary['global_max_trade_date']}")
+    typer.echo(f"total_warn_rows: {summary['total_warn_rows']}")
+    typer.echo(f"total_invalid_rows: {summary['total_invalid_rows']}")
+    typer.echo("top_warn_tickers_top10:")
+    for row in summary["top_tickers_by_warn_rows"][:10]:
+        typer.echo(
+            f"{row.get('ticker')} | exch={row.get('exchange')} | warn_rows={row.get('warn_row_count')} | rows={row.get('row_count')}"
+        )
+    typer.echo(f"summary_json: {sanity_result.summary_path}")
+    typer.echo(f"by_exchange_parquet: {sanity_result.by_exchange_path}")
+    typer.echo(f"rows_by_year_parquet: {sanity_result.rows_by_year_path}")
+
+
+@app.command("list-problem-tickers")
+def list_problem_tickers_cmd(
+    limit: int = typer.Option(50, "--limit", min=1, help="Maximum number of tickers to show."),
+    only_invalid: bool = typer.Option(False, "--only-invalid", help="Show only symbols with invalid rows > 0."),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """List tickers with warnings and/or invalid rows from symbol master."""
+
+    settings, _ = _load_and_optionally_configure_logger(config_file, configure=False)
+    symbol_master_parquet, _ = symbol_master_paths(settings.paths.bronze_root)
+    if not symbol_master_parquet.exists():
+        raise typer.BadParameter(
+            f"Symbol master not found at {symbol_master_parquet}. Run build-symbol-master first."
+        )
+
+    df = pl.read_parquet(symbol_master_parquet)
+    if only_invalid:
+        problems = df.filter(pl.col("invalid_row_count") > 0)
+    else:
+        problems = df.filter((pl.col("invalid_row_count") > 0) | (pl.col("warn_row_count") > 0))
+
+    if problems.height == 0:
+        typer.echo("No problem tickers found.")
+        return
+
+    preview = (
+        problems.select(["ticker", "exchange", "row_count", "warn_row_count", "invalid_row_count", "first_date", "last_date"])
+        .sort(["invalid_row_count", "warn_row_count", "row_count"], descending=[True, True, True])
+        .head(limit)
+    )
+    typer.echo(str(preview))
 
 
 @app.command("discover-files")

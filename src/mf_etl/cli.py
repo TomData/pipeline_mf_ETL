@@ -21,6 +21,13 @@ from mf_etl.ingest.discover import discover_txt_files, extract_ticker_hint, infe
 from mf_etl.ingest.manifest import ManifestStatus, build_manifest, write_manifest_parquet
 from mf_etl.ingest.read_txt import read_stock_txt_with_rejects
 from mf_etl.logging_utils import configure_logging
+from mf_etl.silver.pipeline import (
+    SilverRunOptions,
+    resolve_bronze_file_for_ticker,
+    run_silver_one_from_bronze_file,
+    run_silver_pipeline,
+    run_silver_sanity,
+)
 from mf_etl.silver.placeholders import ensure_silver_placeholder
 from mf_etl.gold.placeholders import ensure_gold_placeholder
 from mf_etl.transform.normalize import BronzeNormalizeMetadata, normalize_bronze_rows
@@ -602,6 +609,158 @@ def bronze_one(
     typer.echo(f"bronze_parquet: {write_result.bronze_path}")
     typer.echo(f"rejects_parquet: {write_result.rejects_path if write_result.rejects_path else 'none'}")
     typer.echo(f"quality_report_json: {write_result.quality_report_path}")
+
+
+@app.command("silver-one")
+def silver_one(
+    ticker: str | None = typer.Option(
+        None,
+        "--ticker",
+        help="Ticker symbol to resolve from Bronze outputs.",
+    ),
+    bronze_file: Path | None = typer.Option(
+        None,
+        "--bronze-file",
+        help="Direct path to a Bronze per-symbol parquet file.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Build Silver base features for one symbol from Bronze parquet."""
+
+    if (ticker is None and bronze_file is None) or (ticker is not None and bronze_file is not None):
+        raise typer.BadParameter("Provide exactly one of --ticker or --bronze-file.")
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    source_bronze_file = bronze_file
+    if source_bronze_file is None:
+        source_bronze_file = resolve_bronze_file_for_ticker(settings.paths.bronze_root, ticker=ticker or "")
+
+    run_id = f"silver-one-{uuid4().hex[:12]}"
+    try:
+        result = run_silver_one_from_bronze_file(
+            source_bronze_file,
+            settings,
+            run_id=run_id,
+            logger=logger,
+        )
+    except Exception as exc:
+        logger.exception("silver_one.failed bronze_file=%s ticker=%s", source_bronze_file, ticker)
+        raise RuntimeError(f"silver-one failed: {exc}") from exc
+
+    logger.info(
+        "silver_one.summary ticker=%s exchange=%s rows_in=%s rows_out=%s output=%s",
+        result.ticker,
+        result.exchange,
+        result.rows_in,
+        result.rows_out,
+        result.silver_path,
+    )
+    typer.echo(f"ticker: {result.ticker}")
+    typer.echo(f"exchange: {result.exchange}")
+    typer.echo(f"rows_in: {result.rows_in}")
+    typer.echo(f"rows_out: {result.rows_out}")
+    typer.echo(f"min_trade_date: {result.min_trade_date.isoformat() if result.min_trade_date else None}")
+    typer.echo(f"max_trade_date: {result.max_trade_date.isoformat() if result.max_trade_date else None}")
+    typer.echo(f"output_path: {result.silver_path}")
+
+
+@app.command("silver-run")
+def silver_run(
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        min=1,
+        help="Process at most N symbols.",
+    ),
+    progress_every: int = typer.Option(
+        100,
+        "--progress-every",
+        min=1,
+        help="Log progress every N symbols.",
+    ),
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help="Reserved for future incremental mode; v1 still rebuilds selected symbols.",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run batch Silver base-series generation from Bronze valid outputs."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    options = SilverRunOptions(limit=limit, progress_every=progress_every, full=full)
+    result = run_silver_pipeline(settings, options=options, logger=logger)
+
+    summary = result.summary
+    typer.echo(f"run_id: {summary['run_id']}")
+    typer.echo(f"symbols_selected_total: {summary['symbols_selected_total']}")
+    typer.echo(f"symbols_processed_success: {summary['symbols_processed_success']}")
+    typer.echo(f"symbols_processed_failed: {summary['symbols_processed_failed']}")
+    typer.echo(f"rows_in_total: {summary['rows_in_total']}")
+    typer.echo(f"rows_out_total: {summary['rows_out_total']}")
+    typer.echo(f"duration_sec: {summary['duration_sec']}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"ticker_results_path: {result.ticker_results_path}")
+
+
+@app.command("silver-sanity")
+def silver_sanity(
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Scan Silver outputs and print compact sanity metrics."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = run_silver_sanity(settings.paths.silver_root, logger=logger)
+    summary = result.summary
+
+    logger.info(
+        "silver_sanity.summary ticker_count=%s total_rows=%s min_date=%s max_date=%s read_errors=%s",
+        summary["ticker_count"],
+        summary["total_rows"],
+        summary["global_min_trade_date"],
+        summary["global_max_trade_date"],
+        result.read_errors,
+    )
+
+    typer.echo(f"silver_file_count: {result.silver_file_count}")
+    typer.echo(f"ticker_count: {summary['ticker_count']}")
+    typer.echo(f"total_rows: {summary['total_rows']}")
+    typer.echo(f"global_min_trade_date: {summary['global_min_trade_date']}")
+    typer.echo(f"global_max_trade_date: {summary['global_max_trade_date']}")
+    typer.echo(f"read_errors: {result.read_errors}")
+    typer.echo("key_feature_null_rates:")
+    for feature, rate in summary["key_feature_null_rates"].items():
+        typer.echo(f"  {feature}: {rate}")
+    typer.echo("feature_columns_present:")
+    typer.echo(", ".join(summary["feature_columns_present"]))
 
 
 def main() -> None:

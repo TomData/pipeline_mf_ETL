@@ -83,3 +83,37 @@ After `init-placeholders`, the project layout includes:
 - List problematic tickers:
   - `python -m mf_etl.cli list-problem-tickers --limit 50`
   - `python -m mf_etl.cli list-problem-tickers --only-invalid`
+
+## Silver Base Layer
+
+The Silver base layer builds research-ready per-symbol helper series on top of Bronze valid rows.
+It includes:
+
+- Identity/context columns (`ticker`, `exchange`, `trade_date`, `trade_dt`, `source_file`, `run_id`)
+- Core market columns (`open`, `high`, `low`, `close`, `volume`, `openint`)
+- Base helper features for future TMF/TTI/event-grammar work:
+  - price geometry
+  - return/gap features
+  - range/ATR helpers
+  - volume/liquidity helpers
+  - rolling context features
+  - warmup/readiness flags
+
+Silver outputs are written per ticker to:
+
+- `data/silver/base_series_by_symbol/exchange=<EXCHANGE>/prefix=<LETTER>/ticker=<TICKER>/part-000.parquet`
+
+Run commands:
+
+- `python -m mf_etl.cli silver-one --ticker AAPL.US`
+- `python -m mf_etl.cli silver-one --bronze-file /abs/path/to/data/bronze/ohlcv_by_symbol/.../part-000.parquet`
+- `python -m mf_etl.cli silver-run --limit 10`
+- `python -m mf_etl.cli silver-run`
+- `python -m mf_etl.cli silver-sanity`
+
+Silver run artifacts:
+
+- `artifacts/silver_run_summaries/<run_id>_silver_run_summary.json`
+- `artifacts/silver_run_summaries/<run_id>_silver_ticker_results.parquet`
+
+This base layer is the foundation for future TMF/TTI, event grammar, and downstream research/ML pipelines.

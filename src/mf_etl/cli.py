@@ -35,6 +35,13 @@ from mf_etl.silver.indicators_pipeline import (
     run_indicators_pipeline,
     run_indicators_sanity,
 )
+from mf_etl.gold.pipeline import (
+    GoldEventRunOptions,
+    resolve_indicator_file_for_ticker,
+    run_events_one_from_indicator_file,
+    run_events_pipeline,
+    run_events_sanity,
+)
 from mf_etl.silver.placeholders import ensure_silver_placeholder
 from mf_etl.gold.placeholders import ensure_gold_placeholder
 from mf_etl.transform.normalize import BronzeNormalizeMetadata, normalize_bronze_rows
@@ -923,6 +930,164 @@ def indicators_sanity(
     typer.echo("top_20_symbols_by_max_abs_tmf_21:")
     for row in summary["top_20_symbols_by_max_abs_tmf_21"]:
         typer.echo(f"{row['ticker']} | max_abs_tmf_21={row['max_abs_tmf_21']}")
+    typer.echo(f"summary_path: {result.summary_path}")
+
+
+@app.command("events-one")
+def events_one(
+    ticker: str | None = typer.Option(
+        None,
+        "--ticker",
+        help="Ticker symbol to resolve from indicator outputs.",
+    ),
+    indicator_file: Path | None = typer.Option(
+        None,
+        "--indicator-file",
+        help="Direct path to one indicator parquet file.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Build Gold Event Grammar v1 for one symbol."""
+
+    if (ticker is None and indicator_file is None) or (ticker is not None and indicator_file is not None):
+        raise typer.BadParameter("Provide exactly one of --ticker or --indicator-file.")
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    source_indicator_file = indicator_file
+    if source_indicator_file is None:
+        source_indicator_file = resolve_indicator_file_for_ticker(settings.paths.silver_root, ticker=ticker or "")
+
+    run_id = f"events-one-{uuid4().hex[:12]}"
+    try:
+        result = run_events_one_from_indicator_file(
+            source_indicator_file,
+            settings,
+            run_id=run_id,
+            logger=logger,
+        )
+    except Exception as exc:
+        logger.exception("events_one.failed indicator_file=%s ticker=%s", source_indicator_file, ticker)
+        raise RuntimeError(f"events-one failed: {exc}") from exc
+
+    logger.info(
+        "events_one.summary ticker=%s exchange=%s rows_in=%s rows_out=%s output=%s",
+        result.ticker,
+        result.exchange,
+        result.rows_in,
+        result.rows_out,
+        result.output_path,
+    )
+    typer.echo(f"ticker: {result.ticker}")
+    typer.echo(f"exchange: {result.exchange}")
+    typer.echo(f"rows_in: {result.rows_in}")
+    typer.echo(f"rows_out: {result.rows_out}")
+    typer.echo(f"min_trade_date: {result.min_trade_date.isoformat() if result.min_trade_date else None}")
+    typer.echo(f"max_trade_date: {result.max_trade_date.isoformat() if result.max_trade_date else None}")
+    typer.echo(f"output_path: {result.output_path}")
+
+
+@app.command("events-run")
+def events_run(
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        min=1,
+        help="Process at most N symbols.",
+    ),
+    progress_every: int = typer.Option(
+        100,
+        "--progress-every",
+        min=1,
+        help="Log progress every N symbols.",
+    ),
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help="Reserved for future incremental mode; v1 rebuilds selected symbols.",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run batch Gold Event Grammar v1 over indicator outputs."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    options = GoldEventRunOptions(limit=limit, progress_every=progress_every, full=full)
+    result = run_events_pipeline(settings, options=options, logger=logger)
+
+    summary = result.summary
+    typer.echo(f"run_id: {summary['run_id']}")
+    typer.echo(f"symbols_total_selected: {summary['symbols_total_selected']}")
+    typer.echo(f"symbols_success: {summary['symbols_success']}")
+    typer.echo(f"symbols_failed: {summary['symbols_failed']}")
+    typer.echo(f"rows_total: {summary['rows_total']}")
+    typer.echo(f"global_min_trade_date: {summary['global_min_trade_date']}")
+    typer.echo(f"global_max_trade_date: {summary['global_max_trade_date']}")
+    typer.echo(f"state_counts_global: {summary['state_counts_global']}")
+    typer.echo(f"duration_sec: {summary['duration_sec']}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"ticker_results_path: {result.ticker_results_path}")
+
+
+@app.command("events-sanity")
+def events_sanity(
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Scan Gold event outputs and print compact QA summary."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = run_events_sanity(settings.paths.gold_root, settings.paths.artifacts_root, logger=logger)
+    summary = result.summary
+
+    logger.info(
+        "events_sanity.summary symbol_count=%s total_rows=%s min_date=%s max_date=%s read_errors=%s summary_path=%s",
+        summary["symbol_count"],
+        summary["total_rows"],
+        summary["global_min_trade_date"],
+        summary["global_max_trade_date"],
+        result.read_errors,
+        result.summary_path,
+    )
+
+    typer.echo(f"gold_event_file_count: {result.gold_event_file_count}")
+    typer.echo(f"symbol_count: {summary['symbol_count']}")
+    typer.echo(f"total_rows: {summary['total_rows']}")
+    typer.echo(f"global_min_trade_date: {summary['global_min_trade_date']}")
+    typer.echo(f"global_max_trade_date: {summary['global_max_trade_date']}")
+    typer.echo(f"key_event_counts: {summary['key_event_counts']}")
+    typer.echo(f"state_distribution: {summary['state_distribution']}")
+    typer.echo("top_20_symbols_by_max_tmf_event_activity_20:")
+    for row in summary["top_20_symbols_by_max_tmf_event_activity_20"]:
+        typer.echo(f"{row['ticker']} | max_tmf_event_activity_20={row['max_tmf_event_activity_20']}")
+    typer.echo("top_20_symbols_by_tmf_respect_fail_count:")
+    for row in summary["top_20_symbols_by_tmf_respect_fail_count"]:
+        typer.echo(f"{row['ticker']} | tmf_respect_fail_count={row['tmf_respect_fail_count']}")
     typer.echo(f"summary_path: {result.summary_path}")
 
 

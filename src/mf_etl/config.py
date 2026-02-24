@@ -79,6 +79,18 @@ class IndicatorsConfig(BaseModel):
     float_dtype_override: Literal["float64", "float32"] | None = None
 
 
+class EventGrammarConfig(BaseModel):
+    """Gold event-grammar thresholds and behavior switches."""
+
+    pivot_mode: Literal["3bar"] = "3bar"
+    respect_fail_lookahead_bars: int = Field(default=10, ge=1)
+    hold_consecutive_bars: int = Field(default=5, ge=1)
+    tmf_burst_abs_threshold: float = Field(default=0.15, ge=0.0)
+    tmf_burst_slope_threshold: float = Field(default=0.05, ge=0.0)
+    activity_windows: list[int] = Field(default_factory=lambda: [5, 20], min_length=1)
+    eps: float = Field(default=1e-12, gt=0.0)
+
+
 class AppSettings(BaseSettings):
     """Top-level application settings."""
 
@@ -90,6 +102,7 @@ class AppSettings(BaseSettings):
     parquet: ParquetConfig = Field(default_factory=ParquetConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
+    event_grammar: EventGrammarConfig = Field(default_factory=EventGrammarConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="MF_ETL_",

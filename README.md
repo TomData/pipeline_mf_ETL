@@ -145,3 +145,39 @@ Indicator artifacts:
 - `artifacts/indicator_run_summaries/<run_id>_indicators_run_summary.json`
 - `artifacts/indicator_run_summaries/<run_id>_indicators_ticker_results.parquet`
 - `artifacts/indicator_qa/indicator_sanity_summary.json`
+
+## Gold Event Grammar v1
+
+Gold Event Grammar v1 converts indicator series into deterministic per-bar event/state columns for research:
+
+- TMF zero-line, pivot, respect/failure, burst, and hold events
+- TTI proxy zero/burst/hold events
+- bars-since counters and rolling event activity/asymmetry features
+- MVP deterministic state coding:
+  - `S0_QUIET`
+  - `S1_EARLY_DEMAND`
+  - `S2_PERSISTENT_DEMAND`
+  - `S3_EARLY_SUPPLY`
+  - `S4_PERSISTENT_SUPPLY`
+
+This S0-S4 coding is a seed state model for downstream clustering/HMM work, not a final ontology.
+
+Gold outputs are written to:
+
+- `data/gold/events_by_symbol/exchange=<EXCHANGE>/prefix=<LETTER>/ticker=<TICKER>/part-000.parquet`
+
+Run commands:
+
+- `python -m mf_etl.cli events-one --ticker AAPL.US`
+- `python -m mf_etl.cli events-one --indicator-file /abs/path/to/data/silver/indicators_by_symbol/.../part-000.parquet`
+- `python -m mf_etl.cli events-run --limit 10`
+- `python -m mf_etl.cli events-run`
+- `python -m mf_etl.cli events-sanity`
+
+Gold event artifacts:
+
+- `artifacts/gold_event_run_summaries/<run_id>_events_run_summary.json`
+- `artifacts/gold_event_run_summaries/<run_id>_events_ticker_results.parquet`
+- `artifacts/gold_event_qa/events_sanity_summary.json`
+
+These outputs feed the next stage: Gold feature sets for regime clustering, HMM, and backtest research.

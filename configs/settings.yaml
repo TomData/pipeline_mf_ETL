@@ -31,3 +31,12 @@ indicators:
   eps: 1.0e-12
   proxy_period: 21
   float_dtype_override: null
+
+event_grammar:
+  pivot_mode: 3bar
+  respect_fail_lookahead_bars: 10
+  hold_consecutive_bars: 5
+  tmf_burst_abs_threshold: 0.15
+  tmf_burst_slope_threshold: 0.05
+  activity_windows: [5, 20]
+  eps: 1.0e-12

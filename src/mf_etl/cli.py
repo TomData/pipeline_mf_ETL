@@ -5,16 +5,18 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 import polars as pl
 import typer
 import yaml
 
+from mf_etl.bronze.pipeline import BronzeRunOptions, run_bronze_pipeline
 from mf_etl.bronze.writer import write_bronze_artifacts
 from mf_etl.config import AppSettings, load_settings
 from mf_etl.ingest.discover import discover_txt_files, extract_ticker_hint, infer_exchange_from_path
-from mf_etl.ingest.manifest import build_manifest, write_manifest_parquet
+from mf_etl.ingest.manifest import ManifestStatus, build_manifest, write_manifest_parquet
 from mf_etl.ingest.read_txt import read_stock_txt_with_rejects
 from mf_etl.logging_utils import configure_logging
 from mf_etl.silver.placeholders import ensure_silver_placeholder
@@ -64,6 +66,33 @@ def show_config(
 
 @app.command("bronze-run")
 def bronze_run(
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help="Process all files (including UNCHANGED).",
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        min=1,
+        help="Process at most N selected files.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Discover and classify files without processing.",
+    ),
+    progress_every: int = typer.Option(
+        100,
+        "--progress-every",
+        min=1,
+        help="Log progress every N processed files.",
+    ),
+    only_status: str | None = typer.Option(
+        None,
+        "--only-status",
+        help="Optional status filter: NEW, CHANGED, or UNCHANGED.",
+    ),
     config_file: Path | None = typer.Option(
         None,
         "--config-file",
@@ -74,24 +103,38 @@ def bronze_run(
         readable=True,
     ),
 ) -> None:
-    """Placeholder Bronze pipeline run."""
+    """Run incremental Bronze pipeline over discovered source files."""
+
+    normalized_only_status: str | None = None
+    if only_status is not None:
+        candidate = only_status.strip().upper()
+        if candidate not in {"NEW", "CHANGED", "UNCHANGED"}:
+            raise typer.BadParameter("only-status must be one of: NEW, CHANGED, UNCHANGED")
+        normalized_only_status = candidate
 
     settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
-    logger.info("bronze_run.start project=%s env=%s", settings.project.name, settings.project.env)
-    logger.info(
-        "bronze_run.paths raw_root=%s bronze_root=%s logs_root=%s",
-        settings.paths.raw_root,
-        settings.paths.bronze_root,
-        settings.paths.logs_root,
+    options = BronzeRunOptions(
+        full=full,
+        limit=limit,
+        dry_run=dry_run,
+        progress_every=progress_every,
+        only_status=cast(ManifestStatus | None, normalized_only_status),
     )
-    logger.info(
-        "bronze_run.parquet compression=%s level=%s statistics=%s",
-        settings.parquet.compression,
-        settings.parquet.compression_level,
-        settings.parquet.statistics,
-    )
-    logger.info("bronze_run.complete status=placeholder")
-    typer.echo("Bronze run placeholder executed. See logs/etl.log for details.")
+    result = run_bronze_pipeline(settings, options=options, logger=logger)
+
+    summary = result.summary
+    typer.echo(f"run_id: {summary['run_id']}")
+    typer.echo(f"files_discovered_total: {summary['files_discovered_total']}")
+    typer.echo(f"files_selected_total: {summary['files_selected_total']}")
+    typer.echo(f"files_processed_success: {summary['files_processed_success']}")
+    typer.echo(f"files_processed_failed: {summary['files_processed_failed']}")
+    typer.echo(f"files_skipped_unchanged: {summary['files_skipped_unchanged']}")
+    typer.echo(f"rows_total: {summary['rows_total']}")
+    typer.echo(f"rows_valid: {summary['rows_valid']}")
+    typer.echo(f"rows_invalid: {summary['rows_invalid']}")
+    typer.echo(f"manifest_current_path: {summary['outputs']['manifest_current_path']}")
+    typer.echo(f"manifest_stable_path: {summary['outputs']['manifest_stable_path']}")
+    typer.echo(f"summary_path: {result.summary_path}")
 
 
 @app.command("init-placeholders")

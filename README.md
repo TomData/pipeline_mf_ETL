@@ -24,6 +24,8 @@ Run CLI commands:
 
 ```bash
 python -m mf_etl.cli show-config
+python -m mf_etl.cli bronze-run --dry-run
+python -m mf_etl.cli bronze-run --limit 10
 python -m mf_etl.cli bronze-run
 python -m mf_etl.cli init-placeholders
 ```
@@ -52,3 +54,13 @@ After `init-placeholders`, the project layout includes:
 - `data/gold`
 - `artifacts`
 - `logs/etl.log`
+
+## Bronze Incremental Behavior
+
+- `bronze-run` writes a classified current manifest to `data/bronze/manifests/file_manifest_current.parquet`.
+- Default mode processes only `NEW` and `CHANGED` files (by `source_file` + `fingerprint`).
+- `--full` processes all files, including `UNCHANGED`.
+- `--dry-run` classifies and writes current manifest but does not process files.
+- Stable manifest promotion to `data/bronze/manifests/file_manifest.parquet` occurs only for non-dry, non-limited, non-filtered runs.
+- Per-file processing failures are logged and captured in run summary artifacts, while the run continues.
+- Stable manifest is still promoted when such a full run reaches completion, even with per-file failures.

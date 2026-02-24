@@ -27,6 +27,8 @@ def summarize_research_run(run_dir: Path) -> dict[str, Any]:
     preprocess_summary_path = run_dir / "preprocess_summary.json"
     metrics_path = run_dir / "clustering_metrics.json"
     profile_path = run_dir / "cluster_profile.parquet"
+    split_summary_path = run_dir / "split_summary.json"
+    robustness_summary_path = run_dir / "robustness_summary.json"
 
     if not run_summary_path.exists():
         raise FileNotFoundError(f"run_summary.json missing in {run_dir}")
@@ -39,6 +41,16 @@ def summarize_research_run(run_dir: Path) -> dict[str, Any]:
     preprocess_summary = (
         json.loads(preprocess_summary_path.read_text(encoding="utf-8"))
         if preprocess_summary_path.exists()
+        else {}
+    )
+    split_summary = (
+        json.loads(split_summary_path.read_text(encoding="utf-8"))
+        if split_summary_path.exists()
+        else {}
+    )
+    robustness_summary = (
+        json.loads(robustness_summary_path.read_text(encoding="utf-8"))
+        if robustness_summary_path.exists()
         else {}
     )
     clustering_metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
@@ -82,6 +94,8 @@ def summarize_research_run(run_dir: Path) -> dict[str, Any]:
         "run_summary": run_summary,
         "clustering_metrics": clustering_metrics,
         "preprocess_summary": preprocess_summary,
+        "split_summary": split_summary,
+        "robustness_summary": robustness_summary,
         "top_clusters_by_fwd_ret_10_mean": top_fwd_ret_10,
         "top_clusters_by_flow_activity_20_mean": top_flow_activity,
         "forward_aggregate_nan_summary": forward_aggregate_nan_summary,

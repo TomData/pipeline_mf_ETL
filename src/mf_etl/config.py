@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 from pathlib import Path
 from typing import ClassVar, Literal
 
@@ -132,6 +133,21 @@ class ResearchGMMConfig(BaseModel):
     max_iter: int = Field(default=200, ge=1)
 
 
+class ResearchTimeSplitConfig(BaseModel):
+    """Default time split boundaries for OOS research runs."""
+
+    train_end: date | None = None
+    test_start: date | None = None
+    test_end: date | None = None
+
+
+class ResearchStabilityConfig(BaseModel):
+    """Default settings for seed-based clustering stability sweeps."""
+
+    seeds_default: int = Field(default=10, ge=1)
+    seed_start_default: int = 42
+
+
 class ResearchClusteringConfig(BaseModel):
     """Research clustering defaults for unsupervised baseline pipeline."""
 
@@ -166,6 +182,10 @@ class ResearchClusteringConfig(BaseModel):
         min_length=1,
     )
     scaler: Literal["standard", "robust"] = "standard"
+    scaling_scope_default: Literal["global", "per_ticker"] = "global"
+    split_mode_default: Literal["none", "time"] = "none"
+    time_split: ResearchTimeSplitConfig = Field(default_factory=ResearchTimeSplitConfig)
+    stability: ResearchStabilityConfig = Field(default_factory=ResearchStabilityConfig)
     clip_zscore: float | None = Field(default=8.0, gt=0.0)
     silhouette_sample_max: int = Field(default=200_000, ge=1000)
     random_state: int = 42

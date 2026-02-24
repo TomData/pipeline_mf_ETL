@@ -241,7 +241,10 @@ Core commands:
 
 - `python -m mf_etl.cli research-cluster-run --dataset /abs/path/dataset.parquet --method kmeans --n-clusters 5`
 - `python -m mf_etl.cli research-cluster-run --dataset /abs/path/dataset.parquet --method gmm --n-clusters 5`
+- `python -m mf_etl.cli research-cluster-run --dataset /abs/path/dataset.parquet --method kmeans --n-clusters 5 --split-mode time --train-end 2020-12-31`
+- `python -m mf_etl.cli research-cluster-run --dataset /abs/path/dataset.parquet --method kmeans --n-clusters 5 --scaling-scope per_ticker`
 - `python -m mf_etl.cli research-cluster-sweep --dataset /abs/path/dataset.parquet`
+- `python -m mf_etl.cli research-cluster-stability --dataset /abs/path/dataset.parquet --method kmeans --n-clusters 5 --seeds 10`
 - `python -m mf_etl.cli research-cluster-sanity --run-dir /abs/path/to/artifacts/research_runs/<run_dir>`
 
 Run artifacts:
@@ -252,6 +255,25 @@ Run artifacts:
 - `artifacts/research_runs/<run_id>_<method>_<dataset_tag>/cluster_profile.parquet`
 - `artifacts/research_runs/<run_id>_<method>_<dataset_tag>/cluster_profile.csv`
 - `artifacts/research_runs/<run_id>_<method>_<dataset_tag>/clustered_dataset_sample.parquet`
+- `artifacts/research_runs/<run_id>_<method>_<dataset_tag>/split_summary.json` (when split mode is used)
+- `artifacts/research_runs/<run_id>_<method>_<dataset_tag>/robustness_summary.json`
+- `artifacts/research_runs/<run_id>_cluster_sweep_summary.csv`
+- `artifacts/research_runs/<run_id>_<method>_<dataset_tag>/stability_summary.json`
+- `artifacts/research_runs/<run_id>_<method>_<dataset_tag>/stability_pairwise_ari.csv`
 
 Cluster profiles include forward-return validation columns (`fwd_ret_5/10/20` means/medians/hit rates) to evaluate separation before moving to sequential/HMM modeling.
 Forward validation aggregates are computed using finite-value-only inputs (NaN/inf are normalized to null before aggregation) for QA consistency.
+
+### Robustness Workflow
+
+- Time OOS split: use `--split-mode time --train-end YYYY-MM-DD` to fit scaler/model on train and evaluate profiles on test.
+- Scaling scope:
+  - `--scaling-scope global` applies one scaler to all symbols.
+  - `--scaling-scope per_ticker` fits scaler parameters per ticker from fit rows and applies them to prediction rows.
+- Seed stability: run `research-cluster-stability` to compute pairwise ARI across seeds.
+- Recommended pre-HMM workflow:
+  1. baseline `research-cluster-run`
+  2. `research-cluster-sweep` for K/metric tradeoffs
+  3. `research-cluster-stability` for ARI robustness
+  4. OOS rerun with `--split-mode time`
+  5. compare train/test profiles and forward-return validation

@@ -51,7 +51,11 @@ from mf_etl.gold.features_pipeline import (
     run_features_pipeline,
     run_features_sanity,
 )
-from mf_etl.research.pipeline import run_research_cluster, run_research_cluster_sweep
+from mf_etl.research.pipeline import (
+    run_research_cluster,
+    run_research_cluster_stability,
+    run_research_cluster_sweep,
+)
 from mf_etl.research.sanity import summarize_research_run
 from mf_etl.silver.placeholders import ensure_silver_placeholder
 from mf_etl.gold.placeholders import ensure_gold_placeholder
@@ -110,6 +114,16 @@ def _parse_method_csv(value: str) -> list[str]:
         if method not in allowed:
             raise typer.BadParameter("methods must be comma-separated values from: kmeans,gmm,hdbscan")
     return methods
+
+
+def _normalize_choice(value: str | None, *, allowed: set[str], option_name: str) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized not in allowed:
+        allowed_rendered = ",".join(sorted(allowed))
+        raise typer.BadParameter(f"{option_name} must be one of: {allowed_rendered}")
+    return normalized
 
 
 @app.command("show-config")
@@ -1401,6 +1415,46 @@ def research_cluster_run(
         "--date-to",
         help="Optional date upper bound YYYY-MM-DD.",
     ),
+    split_mode: str = typer.Option(
+        "none",
+        "--split-mode",
+        help="Split mode: none or time.",
+    ),
+    train_end: str | None = typer.Option(
+        None,
+        "--train-end",
+        help="Train end date YYYY-MM-DD when split-mode=time.",
+    ),
+    test_start: str | None = typer.Option(
+        None,
+        "--test-start",
+        help="Optional test start date YYYY-MM-DD (default: train-end + 1 day).",
+    ),
+    test_end: str | None = typer.Option(
+        None,
+        "--test-end",
+        help="Optional test end date YYYY-MM-DD.",
+    ),
+    fit_on: str = typer.Option(
+        "train",
+        "--fit-on",
+        help="Fit clustering model on train or all rows.",
+    ),
+    predict_on: str | None = typer.Option(
+        None,
+        "--predict-on",
+        help="Predict/profile scope: test or all (default test when split-mode=time).",
+    ),
+    scaler: str | None = typer.Option(
+        None,
+        "--scaler",
+        help="Optional scaler override: standard or robust.",
+    ),
+    scaling_scope: str | None = typer.Option(
+        None,
+        "--scaling-scope",
+        help="Scaling scope override: global or per_ticker.",
+    ),
     features_preset: str = typer.Option(
         "default",
         "--features-preset",
@@ -1438,6 +1492,22 @@ def research_cluster_run(
     parsed_to = _parse_iso_date(date_to, "date-to")
     if parsed_from is not None and parsed_to is not None and parsed_from > parsed_to:
         raise typer.BadParameter("date-from must be <= date-to.")
+    parsed_train_end = _parse_iso_date(train_end, "train-end")
+    parsed_test_start = _parse_iso_date(test_start, "test-start")
+    parsed_test_end = _parse_iso_date(test_end, "test-end")
+    split_mode_norm = _normalize_choice(split_mode, allowed={"none", "time"}, option_name="split-mode")
+    fit_on_norm = _normalize_choice(fit_on, allowed={"train", "all"}, option_name="fit-on")
+    predict_on_norm = _normalize_choice(predict_on, allowed={"test", "all"}, option_name="predict-on")
+    scaler_norm = _normalize_choice(scaler, allowed={"standard", "robust"}, option_name="scaler")
+    scaling_scope_norm = _normalize_choice(
+        scaling_scope,
+        allowed={"global", "per_ticker"},
+        option_name="scaling-scope",
+    )
+    if split_mode_norm == "time" and parsed_train_end is None:
+        raise typer.BadParameter("train-end is required when split-mode=time.")
+    if parsed_test_start is not None and parsed_test_end is not None and parsed_test_start > parsed_test_end:
+        raise typer.BadParameter("test-start must be <= test-end.")
 
     settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
     result = run_research_cluster(
@@ -1450,6 +1520,14 @@ def research_cluster_run(
         date_to=parsed_to,
         random_state=random_state,
         write_full_clustered=write_full_clustered,
+        split_mode=split_mode_norm or "none",
+        train_end=parsed_train_end,
+        test_start=parsed_test_start,
+        test_end=parsed_test_end,
+        fit_on=fit_on_norm or "train",
+        predict_on=predict_on_norm,
+        scaler=scaler_norm,
+        scaling_scope=scaling_scope_norm,
         logger=logger,
     )
     run_summary = json.loads(result.run_summary_path.read_text(encoding="utf-8"))
@@ -1461,6 +1539,11 @@ def research_cluster_run(
     typer.echo(f"features_count: {run_summary['features_count']}")
     typer.echo(f"method: {run_summary['method']}")
     typer.echo(f"n_clusters_requested: {run_summary['n_clusters_requested']}")
+    typer.echo(f"split_mode: {run_summary.get('split_mode')}")
+    typer.echo(f"fit_on: {run_summary.get('fit_on')}")
+    typer.echo(f"predict_on: {run_summary.get('predict_on')}")
+    typer.echo(f"scaler: {run_summary.get('scaler')}")
+    typer.echo(f"scaling_scope: {run_summary.get('scaling_scope')}")
     typer.echo(f"silhouette: {metrics.get('silhouette')}")
     typer.echo(f"davies_bouldin: {metrics.get('davies_bouldin')}")
     typer.echo(f"calinski_harabasz: {metrics.get('calinski_harabasz')}")
@@ -1506,6 +1589,46 @@ def research_cluster_sweep(
         "--date-to",
         help="Optional date upper bound YYYY-MM-DD.",
     ),
+    split_mode: str = typer.Option(
+        "none",
+        "--split-mode",
+        help="Split mode: none or time.",
+    ),
+    train_end: str | None = typer.Option(
+        None,
+        "--train-end",
+        help="Train end date YYYY-MM-DD when split-mode=time.",
+    ),
+    test_start: str | None = typer.Option(
+        None,
+        "--test-start",
+        help="Optional test start date YYYY-MM-DD (default: train-end + 1 day).",
+    ),
+    test_end: str | None = typer.Option(
+        None,
+        "--test-end",
+        help="Optional test end date YYYY-MM-DD.",
+    ),
+    fit_on: str = typer.Option(
+        "train",
+        "--fit-on",
+        help="Fit scope: train or all.",
+    ),
+    predict_on: str | None = typer.Option(
+        None,
+        "--predict-on",
+        help="Predict/profile scope: test or all.",
+    ),
+    scaler: str | None = typer.Option(
+        None,
+        "--scaler",
+        help="Optional scaler override: standard or robust.",
+    ),
+    scaling_scope: str | None = typer.Option(
+        None,
+        "--scaling-scope",
+        help="Scaling scope override: global or per_ticker.",
+    ),
     random_state: int = typer.Option(
         42,
         "--random-state",
@@ -1527,6 +1650,22 @@ def research_cluster_sweep(
     parsed_to = _parse_iso_date(date_to, "date-to")
     if parsed_from is not None and parsed_to is not None and parsed_from > parsed_to:
         raise typer.BadParameter("date-from must be <= date-to.")
+    parsed_train_end = _parse_iso_date(train_end, "train-end")
+    parsed_test_start = _parse_iso_date(test_start, "test-start")
+    parsed_test_end = _parse_iso_date(test_end, "test-end")
+    split_mode_norm = _normalize_choice(split_mode, allowed={"none", "time"}, option_name="split-mode")
+    fit_on_norm = _normalize_choice(fit_on, allowed={"train", "all"}, option_name="fit-on")
+    predict_on_norm = _normalize_choice(predict_on, allowed={"test", "all"}, option_name="predict-on")
+    scaler_norm = _normalize_choice(scaler, allowed={"standard", "robust"}, option_name="scaler")
+    scaling_scope_norm = _normalize_choice(
+        scaling_scope,
+        allowed={"global", "per_ticker"},
+        option_name="scaling-scope",
+    )
+    if split_mode_norm == "time" and parsed_train_end is None:
+        raise typer.BadParameter("train-end is required when split-mode=time.")
+    if parsed_test_start is not None and parsed_test_end is not None and parsed_test_start > parsed_test_end:
+        raise typer.BadParameter("test-start must be <= test-end.")
 
     methods_list = _parse_method_csv(methods)
     n_values = _parse_int_csv(n_clusters_values, "n-clusters-values")
@@ -1541,6 +1680,14 @@ def research_cluster_sweep(
         date_from=parsed_from,
         date_to=parsed_to,
         random_state=random_state,
+        split_mode=split_mode_norm or "none",
+        train_end=parsed_train_end,
+        test_start=parsed_test_start,
+        test_end=parsed_test_end,
+        fit_on=fit_on_norm or "train",
+        predict_on=predict_on_norm,
+        scaler=scaler_norm,
+        scaling_scope=scaling_scope_norm,
         logger=logger,
     )
 
@@ -1568,6 +1715,8 @@ def research_cluster_sanity(
     run_summary = summary["run_summary"]
     metrics = summary["clustering_metrics"].get("metrics", {})
     preprocess = summary.get("preprocess_summary", {})
+    split = summary.get("split_summary", {})
+    robustness = summary.get("robustness_summary", {})
 
     typer.echo(f"run_id: {run_summary.get('run_id')}")
     typer.echo(f"method: {run_summary.get('method')}")
@@ -1577,6 +1726,14 @@ def research_cluster_sanity(
     typer.echo(f"davies_bouldin: {metrics.get('davies_bouldin')}")
     typer.echo(f"calinski_harabasz: {metrics.get('calinski_harabasz')}")
     typer.echo(f"rows_dropped_null_features: {preprocess.get('rows_dropped_null_features')}")
+    if split:
+        typer.echo(f"split_mode: {split.get('split_mode')}")
+        typer.echo(f"fit_on: {split.get('fit_on')}")
+        typer.echo(f"predict_on: {split.get('predict_on')}")
+        typer.echo(f"preprocess_scaling_scope: {split.get('preprocess_scaling_scope')}")
+    if robustness:
+        typer.echo(f"largest_cluster_share: {robustness.get('largest_cluster_share')}")
+        typer.echo(f"forward_separation_score: {robustness.get('forward_separation_score')}")
     nan_summary = summary.get("forward_aggregate_nan_summary", {})
     nan_total = sum(item.get("nan_count", 0) for item in nan_summary.values())
     typer.echo(f"forward_aggregate_nan_total: {nan_total}")
@@ -1590,6 +1747,174 @@ def research_cluster_sanity(
         typer.echo(
             f"cluster={row.get('cluster_id')} | rows={row.get('row_count')} | flow_activity_20_mean={row.get('flow_activity_20_mean')}"
         )
+
+
+@app.command("research-cluster-stability")
+def research_cluster_stability(
+    dataset: Path = typer.Option(
+        ...,
+        "--dataset",
+        help="Path to exported ML dataset parquet.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    method: str = typer.Option(
+        "kmeans",
+        "--method",
+        help="Stability method: kmeans or gmm.",
+    ),
+    n_clusters: int = typer.Option(
+        5,
+        "--n-clusters",
+        min=2,
+        help="Number of clusters/components for kmeans/gmm.",
+    ),
+    seeds: int | None = typer.Option(
+        None,
+        "--seeds",
+        min=1,
+        help="Number of random seeds to evaluate.",
+    ),
+    seed_start: int | None = typer.Option(
+        None,
+        "--seed-start",
+        help="Starting random seed (sweep uses seed_start..seed_start+seeds-1).",
+    ),
+    sample_frac: float | None = typer.Option(
+        None,
+        "--sample-frac",
+        help="Optional dataset sample fraction in (0,1].",
+    ),
+    date_from: str | None = typer.Option(
+        None,
+        "--date-from",
+        help="Optional date lower bound YYYY-MM-DD.",
+    ),
+    date_to: str | None = typer.Option(
+        None,
+        "--date-to",
+        help="Optional date upper bound YYYY-MM-DD.",
+    ),
+    scaler: str | None = typer.Option(
+        None,
+        "--scaler",
+        help="Optional scaler override: standard or robust.",
+    ),
+    scaling_scope: str | None = typer.Option(
+        None,
+        "--scaling-scope",
+        help="Scaling scope override: global or per_ticker.",
+    ),
+    split_mode: str = typer.Option(
+        "none",
+        "--split-mode",
+        help="Split mode: none or time.",
+    ),
+    train_end: str | None = typer.Option(
+        None,
+        "--train-end",
+        help="Train end date YYYY-MM-DD when split-mode=time.",
+    ),
+    test_start: str | None = typer.Option(
+        None,
+        "--test-start",
+        help="Optional test start date YYYY-MM-DD (default: train-end + 1 day).",
+    ),
+    test_end: str | None = typer.Option(
+        None,
+        "--test-end",
+        help="Optional test end date YYYY-MM-DD.",
+    ),
+    fit_on: str = typer.Option(
+        "train",
+        "--fit-on",
+        help="Fit scope: train or all.",
+    ),
+    predict_on: str | None = typer.Option(
+        None,
+        "--predict-on",
+        help="Predict/profile scope: test or all.",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run cluster stability sweep across random seeds and emit ARI artifacts."""
+
+    method_norm = _normalize_choice(method, allowed={"kmeans", "gmm"}, option_name="method")
+    parsed_from = _parse_iso_date(date_from, "date-from")
+    parsed_to = _parse_iso_date(date_to, "date-to")
+    if parsed_from is not None and parsed_to is not None and parsed_from > parsed_to:
+        raise typer.BadParameter("date-from must be <= date-to.")
+    parsed_train_end = _parse_iso_date(train_end, "train-end")
+    parsed_test_start = _parse_iso_date(test_start, "test-start")
+    parsed_test_end = _parse_iso_date(test_end, "test-end")
+    if parsed_test_start is not None and parsed_test_end is not None and parsed_test_start > parsed_test_end:
+        raise typer.BadParameter("test-start must be <= test-end.")
+
+    split_mode_norm = _normalize_choice(split_mode, allowed={"none", "time"}, option_name="split-mode")
+    fit_on_norm = _normalize_choice(fit_on, allowed={"train", "all"}, option_name="fit-on")
+    predict_on_norm = _normalize_choice(predict_on, allowed={"test", "all"}, option_name="predict-on")
+    scaler_norm = _normalize_choice(scaler, allowed={"standard", "robust"}, option_name="scaler")
+    scaling_scope_norm = _normalize_choice(
+        scaling_scope,
+        allowed={"global", "per_ticker"},
+        option_name="scaling-scope",
+    )
+    if split_mode_norm == "time" and parsed_train_end is None:
+        raise typer.BadParameter("train-end is required when split-mode=time.")
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    resolved_seeds = seeds if seeds is not None else settings.research_clustering.stability.seeds_default
+    resolved_seed_start = (
+        seed_start if seed_start is not None else settings.research_clustering.stability.seed_start_default
+    )
+    result = run_research_cluster_stability(
+        settings,
+        dataset_path=dataset,
+        method=method_norm or "kmeans",
+        n_clusters=n_clusters,
+        seeds=resolved_seeds,
+        seed_start=resolved_seed_start,
+        sample_frac=sample_frac,
+        date_from=parsed_from,
+        date_to=parsed_to,
+        split_mode=split_mode_norm or "none",
+        train_end=parsed_train_end,
+        test_start=parsed_test_start,
+        test_end=parsed_test_end,
+        fit_on=fit_on_norm or "train",
+        predict_on=predict_on_norm,
+        scaler=scaler_norm,
+        scaling_scope=scaling_scope_norm,
+        logger=logger,
+    )
+
+    summary = json.loads(result.stability_summary_path.read_text(encoding="utf-8"))
+    typer.echo(f"run_id: {summary.get('run_id')}")
+    typer.echo(f"method: {summary.get('method')}")
+    typer.echo(f"n_clusters: {summary.get('n_clusters')}")
+    typer.echo(f"seeds: {summary.get('seeds')}")
+    typer.echo(f"split_mode: {summary.get('split_mode')}")
+    typer.echo(f"fit_on: {summary.get('fit_on')}")
+    typer.echo(f"predict_on: {summary.get('predict_on')}")
+    typer.echo(f"scaler: {summary.get('scaler')}")
+    typer.echo(f"scaling_scope: {summary.get('scaling_scope')}")
+    ari = summary.get("ari_summary", {})
+    typer.echo(f"ari_mean: {ari.get('ari_mean')}")
+    typer.echo(f"ari_median: {ari.get('ari_median')}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"stability_summary_path: {result.stability_summary_path}")
+    typer.echo(f"stability_by_seed_path: {result.stability_by_seed_path}")
+    typer.echo(f"pairwise_ari_path: {result.pairwise_ari_path}")
 
 
 def main() -> None:

@@ -82,6 +82,15 @@ research_clustering:
     - rec_tmf_burst_down_20
     - state_run_length
   scaler: standard
+  scaling_scope_default: global
+  split_mode_default: none
+  time_split:
+    train_end: null
+    test_start: null
+    test_end: null
+  stability:
+    seeds_default: 10
+    seed_start_default: 42
   clip_zscore: 8.0
   silhouette_sample_max: 200000
   random_state: 42

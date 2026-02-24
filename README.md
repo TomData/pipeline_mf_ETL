@@ -311,3 +311,41 @@ Recommended sequence before advanced sequential modeling:
 2. HMM baseline run
 3. compare HMM states vs deterministic flow states and cluster labels
 4. iterate feature set/event grammar and rerun HMM sweep/stability
+
+## Validation Harness v1
+
+Validation Harness v1 adds a reusable statistical validation layer for any state-labeled dataset:
+
+- HMM decoded rows (`hmm_state`)
+- cluster-labeled rows (`cluster_id` / `cluster_label`)
+- generic state labels (for example `flow_state_code`)
+
+It provides:
+
+- bootstrap confidence intervals for forward outcomes
+- pairwise state-difference confidence checks
+- transition event studies around state changes
+- rolling-window stability diagnostics
+- per-state and overall validation scorecards
+
+Core commands:
+
+- `python -m mf_etl.cli validation-run --input-file /abs/path/to/decoded_rows.parquet --input-type hmm`
+- `python -m mf_etl.cli validation-run --input-file /abs/path/to/dataset.parquet --input-type generic --state-col flow_state_code`
+- `python -m mf_etl.cli validation-sanity --run-dir /abs/path/to/artifacts/validation_runs/<run_dir>`
+- `python -m mf_etl.cli validation-compare --run-dir-a <run_a> --run-dir-b <run_b>`
+
+Primary artifacts (per run):
+
+- `artifacts/validation_runs/<run_id>_<input_type>_<state_tag>/run_summary.json`
+- `artifacts/validation_runs/<run_id>_<input_type>_<state_tag>/adapter_summary.json`
+- `artifacts/validation_runs/<run_id>_<input_type>_<state_tag>/bootstrap_state_summary.csv`
+- `artifacts/validation_runs/<run_id>_<input_type>_<state_tag>/bootstrap_pairwise_diff.csv`
+- `artifacts/validation_runs/<run_id>_<input_type>_<state_tag>/transition_event_summary.csv`
+- `artifacts/validation_runs/<run_id>_<input_type>_<state_tag>/transition_event_path_summary.csv`
+- `artifacts/validation_runs/<run_id>_<input_type>_<state_tag>/rolling_state_metrics.csv`
+- `artifacts/validation_runs/<run_id>_<input_type>_<state_tag>/state_stability_summary.csv`
+- `artifacts/validation_runs/<run_id>_<input_type>_<state_tag>/state_scorecard.csv`
+- `artifacts/validation_runs/<run_id>_<input_type>_<state_tag>/validation_scorecard.json`
+
+Forward-outcome aggregation is finite-only: non-finite values are normalized to null before aggregation, and QA guards enforce consistency for counts vs mean/median outputs.

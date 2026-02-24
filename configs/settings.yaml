@@ -25,6 +25,29 @@ validation:
   suspicious_range_pct_threshold: 0.5
   suspicious_return_pct_threshold: 0.3
   gap_days_warn_threshold: 7
+  bootstrap:
+    n_boot: 1000
+    ci: 0.95
+    mode: iid
+    block_length: 10
+    random_state: 42
+  event_study:
+    window_pre: 10
+    window_post: 20
+    min_events_per_transition: 50
+  rolling_stability:
+    window_months: 12
+    step_months: 3
+  scorecard:
+    eps: 1.0e-12
+    confidence_score_weights:
+      sample_size: 0.2
+      ci_width: 0.25
+      sign_confidence: 0.2
+      stability: 0.25
+      separation: 0.1
+  io:
+    write_large_artifacts_default: false
 
 indicators:
   tmf_period: 21

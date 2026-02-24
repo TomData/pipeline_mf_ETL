@@ -63,6 +63,8 @@ from mf_etl.research_hmm.pipeline import (
     run_hmm_sweep,
 )
 from mf_etl.research_hmm.sanity import summarize_hmm_run
+from mf_etl.validation.pipeline import run_validation_compare, run_validation_harness
+from mf_etl.validation.sanity import summarize_validation_run
 from mf_etl.silver.placeholders import ensure_silver_placeholder
 from mf_etl.gold.placeholders import ensure_gold_placeholder
 from mf_etl.transform.normalize import BronzeNormalizeMetadata, normalize_bronze_rows
@@ -2435,6 +2437,255 @@ def research_hmm_stability(
     typer.echo(f"summary_json_path: {result.summary_json_path}")
     typer.echo(f"by_seed_path: {result.by_seed_path}")
     typer.echo(f"pairwise_ari_path: {result.pairwise_ari_path}")
+
+
+@app.command("validation-run")
+def validation_run(
+    input_file: Path = typer.Option(
+        ...,
+        "--input-file",
+        help="Input parquet/csv file (HMM decoded rows, clustered rows, or generic state-labeled rows).",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    input_type: str = typer.Option(
+        "auto",
+        "--input-type",
+        help="Input type: auto, hmm, cluster, generic.",
+    ),
+    state_col: str | None = typer.Option(
+        None,
+        "--state-col",
+        help="State column name for generic input type.",
+    ),
+    bootstrap_n: int | None = typer.Option(
+        None,
+        "--bootstrap-n",
+        min=10,
+        help="Bootstrap iterations override.",
+    ),
+    bootstrap_ci: float | None = typer.Option(
+        None,
+        "--bootstrap-ci",
+        help="Bootstrap confidence level override (0,1).",
+    ),
+    bootstrap_mode: str | None = typer.Option(
+        None,
+        "--bootstrap-mode",
+        help="Bootstrap mode override: iid or block.",
+    ),
+    block_length: int | None = typer.Option(
+        None,
+        "--block-length",
+        min=1,
+        help="Block length for block bootstrap mode.",
+    ),
+    event_window_pre: int | None = typer.Option(
+        None,
+        "--event-window-pre",
+        min=1,
+        help="Transition event-study pre-window bars.",
+    ),
+    event_window_post: int | None = typer.Option(
+        None,
+        "--event-window-post",
+        min=1,
+        help="Transition event-study post-window bars.",
+    ),
+    min_events_per_transition: int | None = typer.Option(
+        None,
+        "--min-events-per-transition",
+        min=1,
+        help="Minimum events per transition code to include in transition summary.",
+    ),
+    window_months: int | None = typer.Option(
+        None,
+        "--window-months",
+        min=1,
+        help="Rolling stability window size in months.",
+    ),
+    step_months: int | None = typer.Option(
+        None,
+        "--step-months",
+        min=1,
+        help="Rolling stability step size in months.",
+    ),
+    write_large_artifacts: bool = typer.Option(
+        False,
+        "--write-large-artifacts",
+        help="Write optional large artifacts (transition events, adapted sample).",
+    ),
+    sample_frac: float | None = typer.Option(
+        None,
+        "--sample-frac",
+        help="Optional row sample fraction in (0,1] for quick tests.",
+    ),
+    date_from: str | None = typer.Option(
+        None,
+        "--date-from",
+        help="Optional date lower bound YYYY-MM-DD.",
+    ),
+    date_to: str | None = typer.Option(
+        None,
+        "--date-to",
+        help="Optional date upper bound YYYY-MM-DD.",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run Validation Harness v1 on state-labeled research outputs."""
+
+    parsed_from = _parse_iso_date(date_from, "date-from")
+    parsed_to = _parse_iso_date(date_to, "date-to")
+    if parsed_from is not None and parsed_to is not None and parsed_from > parsed_to:
+        raise typer.BadParameter("date-from must be <= date-to.")
+
+    input_type_norm = _normalize_choice(
+        input_type,
+        allowed={"auto", "hmm", "cluster", "generic"},
+        option_name="input-type",
+    )
+    bootstrap_mode_norm = _normalize_choice(
+        bootstrap_mode,
+        allowed={"iid", "block"},
+        option_name="bootstrap-mode",
+    )
+    if bootstrap_ci is not None and not 0.0 < bootstrap_ci < 1.0:
+        raise typer.BadParameter("bootstrap-ci must be in (0,1).")
+    if input_type_norm == "generic" and (state_col is None or state_col.strip() == ""):
+        raise typer.BadParameter("state-col is required when input-type=generic.")
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = run_validation_harness(
+        settings,
+        input_file=input_file,
+        input_type=(input_type_norm or "auto"),
+        state_col=state_col,
+        bootstrap_n=bootstrap_n,
+        bootstrap_ci=bootstrap_ci,
+        bootstrap_mode=bootstrap_mode_norm,
+        block_length=block_length,
+        event_window_pre=event_window_pre,
+        event_window_post=event_window_post,
+        min_events_per_transition=min_events_per_transition,
+        window_months=window_months,
+        step_months=step_months,
+        write_large_artifacts=write_large_artifacts,
+        sample_frac=sample_frac,
+        date_from=parsed_from,
+        date_to=parsed_to,
+        logger=logger,
+    )
+    summary = json.loads(result.run_summary_path.read_text(encoding="utf-8"))
+    typer.echo(f"run_id: {summary.get('run_id')}")
+    typer.echo(f"rows: {summary.get('rows')}")
+    typer.echo(f"state_count: {summary.get('state_count')}")
+    typer.echo(f"ticker_count: {summary.get('ticker_count')}")
+    bounds = summary.get("bounds", {})
+    typer.echo(f"min_trade_date: {bounds.get('min_trade_date')}")
+    typer.echo(f"max_trade_date: {bounds.get('max_trade_date')}")
+    typer.echo(
+        f"transition_summary_rows: {summary.get('event_study', {}).get('transition_summary_rows')}"
+    )
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"run_summary_path: {result.run_summary_path}")
+    typer.echo(f"validation_scorecard_path: {result.validation_scorecard_path}")
+
+
+@app.command("validation-sanity")
+def validation_sanity(
+    run_dir: Path = typer.Option(
+        ...,
+        "--run-dir",
+        help="Path to a completed validation run directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+) -> None:
+    """Print concise sanity diagnostics from a completed validation run."""
+
+    summary = summarize_validation_run(run_dir)
+    run_summary = summary["run_summary"]
+    typer.echo(f"run_id: {run_summary.get('run_id')}")
+    typer.echo(f"input_type: {run_summary.get('input_type')}")
+    typer.echo(f"rows: {run_summary.get('rows')}")
+    typer.echo(f"state_count: {run_summary.get('state_count')}")
+    typer.echo(f"validation_grade: {summary.get('validation_grade')}")
+    typer.echo(f"pairwise_significant_diff_share: {summary.get('pairwise_significant_diff_share')}")
+    nan_warnings = summary.get("nan_warnings", {})
+    nan_total = sum(int(value) for value in nan_warnings.values())
+    typer.echo(f"nan_warning_total: {nan_total}")
+    typer.echo("top_states_by_fwd_ret_10_mean:")
+    for row in summary.get("top_states_by_fwd_ret_10_mean", [])[:10]:
+        typer.echo(
+            f"state={row.get('state_id')} | n={row.get('n_rows')} | "
+            f"mean={row.get('fwd_ret_10_mean')} | ci=[{row.get('fwd_ret_10_ci_lo')}, {row.get('fwd_ret_10_ci_hi')}]"
+        )
+    typer.echo("top_transition_codes:")
+    for row in summary.get("top_transition_codes", [])[:10]:
+        typer.echo(
+            f"code={row.get('transition_code')} | count={row.get('count_events')} | "
+            f"fwd_ret_10_mean={row.get('fwd_ret_10_mean')}"
+        )
+
+
+@app.command("validation-compare")
+def validation_compare(
+    run_dir_a: Path = typer.Option(
+        ...,
+        "--run-dir-a",
+        help="First validation run directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    run_dir_b: Path = typer.Option(
+        ...,
+        "--run-dir-b",
+        help="Second validation run directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Compare two validation runs and write comparison artifacts."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = run_validation_compare(
+        settings,
+        run_dir_a=run_dir_a,
+        run_dir_b=run_dir_b,
+        logger=logger,
+    )
+    payload = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    typer.echo(f"compare_id: {payload.get('compare_id')}")
+    typer.echo(f"run_a_validation_grade: {payload.get('run_a_validation_grade')}")
+    typer.echo(f"run_b_validation_grade: {payload.get('run_b_validation_grade')}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"table_path: {result.table_path}")
 
 
 def main() -> None:

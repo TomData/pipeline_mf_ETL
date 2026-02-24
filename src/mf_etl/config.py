@@ -63,12 +63,69 @@ class ParquetConfig(BaseModel):
     statistics: bool = True
 
 
+class ValidationBootstrapConfig(BaseModel):
+    """Bootstrap parameterization for validation harness confidence intervals."""
+
+    n_boot: int = Field(default=1000, ge=10)
+    ci: float = Field(default=0.95, gt=0.0, lt=1.0)
+    mode: Literal["iid", "block"] = "iid"
+    block_length: int = Field(default=10, ge=1)
+    random_state: int = 42
+
+
+class ValidationEventStudyConfig(BaseModel):
+    """Transition event-study defaults for validation harness runs."""
+
+    window_pre: int = Field(default=10, ge=1)
+    window_post: int = Field(default=20, ge=1)
+    min_events_per_transition: int = Field(default=50, ge=1)
+
+
+class ValidationRollingStabilityConfig(BaseModel):
+    """Rolling-window stability defaults for validation harness runs."""
+
+    window_months: int = Field(default=12, ge=1)
+    step_months: int = Field(default=3, ge=1)
+
+
+class ValidationConfidenceScoreWeightsConfig(BaseModel):
+    """Weights for composing per-state validation confidence scores."""
+
+    sample_size: float = 0.2
+    ci_width: float = 0.25
+    sign_confidence: float = 0.2
+    stability: float = 0.25
+    separation: float = 0.1
+
+
+class ValidationScorecardConfig(BaseModel):
+    """Scorecard-level controls for validation harness summaries."""
+
+    eps: float = Field(default=1e-12, gt=0.0)
+    confidence_score_weights: ValidationConfidenceScoreWeightsConfig = Field(
+        default_factory=ValidationConfidenceScoreWeightsConfig
+    )
+
+
+class ValidationIOConfig(BaseModel):
+    """I/O controls for optional large validation harness artifacts."""
+
+    write_large_artifacts_default: bool = False
+
+
 class ValidationConfig(BaseModel):
-    """Validation thresholds for row-level quality checks."""
+    """Validation thresholds and validation-harness controls."""
 
     suspicious_range_pct_threshold: float = 0.5
     suspicious_return_pct_threshold: float = 0.3
     gap_days_warn_threshold: int = 7
+    bootstrap: ValidationBootstrapConfig = Field(default_factory=ValidationBootstrapConfig)
+    event_study: ValidationEventStudyConfig = Field(default_factory=ValidationEventStudyConfig)
+    rolling_stability: ValidationRollingStabilityConfig = Field(
+        default_factory=ValidationRollingStabilityConfig
+    )
+    scorecard: ValidationScorecardConfig = Field(default_factory=ValidationScorecardConfig)
+    io: ValidationIOConfig = Field(default_factory=ValidationIOConfig)
 
 
 class IndicatorsConfig(BaseModel):

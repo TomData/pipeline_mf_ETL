@@ -20,3 +20,8 @@ parquet:
   compression: zstd
   compression_level: 3
   statistics: true
+
+validation:
+  suspicious_range_pct_threshold: 0.5
+  suspicious_return_pct_threshold: 0.3
+  gap_days_warn_threshold: 7

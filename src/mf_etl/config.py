@@ -62,6 +62,14 @@ class ParquetConfig(BaseModel):
     statistics: bool = True
 
 
+class ValidationConfig(BaseModel):
+    """Validation thresholds for row-level quality checks."""
+
+    suspicious_range_pct_threshold: float = 0.5
+    suspicious_return_pct_threshold: float = 0.3
+    gap_days_warn_threshold: int = 7
+
+
 class AppSettings(BaseSettings):
     """Top-level application settings."""
 
@@ -71,6 +79,7 @@ class AppSettings(BaseSettings):
     paths: PathsConfig = Field(default_factory=PathsConfig)
     precision: PrecisionConfig = Field(default_factory=PrecisionConfig)
     parquet: ParquetConfig = Field(default_factory=ParquetConfig)
+    validation: ValidationConfig = Field(default_factory=ValidationConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="MF_ETL_",

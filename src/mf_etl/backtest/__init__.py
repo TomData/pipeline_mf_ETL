@@ -15,6 +15,10 @@ from mf_etl.backtest.execution_realism_calibration import (
     run_execution_realism_calibration,
     run_execution_realism_calibration_report,
 )
+from mf_etl.backtest.production_candidates import (
+    run_production_candidates_build,
+    summarize_production_candidates_pack,
+)
 from mf_etl.backtest.sanity import summarize_backtest_run
 from mf_etl.backtest.sensitivity_runner import (
     run_backtest_grid,
@@ -33,6 +37,8 @@ __all__ = [
     "run_backtest_walkforward",
     "run_execution_realism_calibration",
     "run_execution_realism_calibration_report",
+    "run_production_candidates_build",
+    "summarize_production_candidates_pack",
     "summarize_backtest_run",
     "run_backtest_grid",
     "run_backtest_grid_compare",

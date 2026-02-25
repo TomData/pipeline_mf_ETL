@@ -709,3 +709,39 @@ Calibration artifacts:
 Interpretation note:
 
 - `ZERO_ELIGIBILITY` means threshold mismatch for the current universe/profile, not necessarily strategy failure. Grid summaries expose this with `realism_profile_broken_for_universe`.
+
+## Production Candidate Pack v1
+
+Production Candidate Pack (PCP v1) locks 1-2 deterministic candidate configs from existing grid/WF artifacts into a reusable operator packet.
+
+- build command:
+  - `python -m mf_etl.cli production-candidates-build`
+- sanity command:
+  - `python -m mf_etl.cli production-candidates-sanity --pack-dir <PACK_DIR>`
+
+Default pack inputs point to current known runs:
+
+- A1/A2/A3 HMM baseline grids (none/lite/strict)
+- B HMM+overlay `allow_only` lite grid
+- C HMM+overlay `block_veto` lite grid
+- D1 baseline WF lite + D2 hybrid WF lite
+- latest execution realism report (optional enrichment)
+
+Selection policy (deterministic):
+
+- `CANDIDATE_ALPHA` from A1 by:
+  - robustness_v2 desc, expectancy desc, PF desc, trade_count desc, combo_id asc
+- `CANDIDATE_EXEC` from B by:
+  - PF desc, robustness_v2 desc, ret_cv asc, trade_count desc, combo_id asc
+- optional `CANDIDATE_EXEC_2` from A2 using execution ranking above
+- min trade threshold:
+  - requested `--min-trades` (default `25`)
+  - auto-relax to `10` if needed, with warning
+  - zero-trade combos are never selected
+
+PCP outputs:
+
+- `artifacts/production_candidates/pcp-<id>_production_candidate_pack_v1/production_policy_packet_v1.json`
+- `artifacts/production_candidates/pcp-<id>_production_candidate_pack_v1/production_candidates_table.csv`
+- `artifacts/production_candidates/pcp-<id>_production_candidate_pack_v1/production_candidates_summary.json`
+- `artifacts/production_candidates/pcp-<id>_production_candidate_pack_v1/production_candidate_pack_report.md`

@@ -75,6 +75,10 @@ from mf_etl.backtest.execution_realism_calibration import (
     run_execution_realism_calibration,
     run_execution_realism_calibration_report,
 )
+from mf_etl.backtest.production_candidates import (
+    run_production_candidates_build,
+    summarize_production_candidates_pack,
+)
 from mf_etl.backtest.execution_realism_report import run_execution_realism_report
 from mf_etl.backtest.hybrid_eval_report import run_hybrid_eval_report
 from mf_etl.backtest.sensitivity_runner import (
@@ -5058,6 +5062,191 @@ def hybrid_eval_report(
     typer.echo(f"table_path: {result.table_path}")
     typer.echo(f"wf_table_path: {result.wf_table_path}")
     typer.echo(f"report_path: {result.report_path}")
+
+
+@app.command("production-candidates-build")
+def production_candidates_build(
+    a1_grid_dir: Path = typer.Option(
+        Path("/home/tom/projects/mf_etl/artifacts/backtest_sensitivity/grid-a930d82f0e6b_single-hmm_default"),
+        "--a1-grid-dir",
+        help="A1 grid dir (HMM baseline, exec_profile=none).",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    a2_grid_dir: Path = typer.Option(
+        Path("/home/tom/projects/mf_etl/artifacts/backtest_sensitivity/grid-a3e4481cf84d_single-hmm_default"),
+        "--a2-grid-dir",
+        help="A2 grid dir (HMM baseline, exec_profile=lite).",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    a3_grid_dir: Path = typer.Option(
+        Path("/home/tom/projects/mf_etl/artifacts/backtest_sensitivity/grid-d8d41973c4ba_single-hmm_default"),
+        "--a3-grid-dir",
+        help="A3 grid dir (HMM baseline, exec_profile=strict).",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    b_grid_dir: Path = typer.Option(
+        Path("/home/tom/projects/mf_etl/artifacts/backtest_sensitivity/grid-32508c53d45d_single-hmm_default"),
+        "--b-grid-dir",
+        help="B grid dir (HMM + overlay allow_only, exec_profile=lite).",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    c_grid_dir: Path = typer.Option(
+        Path("/home/tom/projects/mf_etl/artifacts/backtest_sensitivity/grid-4c9a94abc637_single-hmm_default"),
+        "--c-grid-dir",
+        help="C grid dir (HMM + overlay block_veto, exec_profile=lite).",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    wf_baseline_dir: Path | None = typer.Option(
+        Path("/home/tom/projects/mf_etl/artifacts/backtest_sensitivity_walkforward/wfgrid-1e39c4472385"),
+        "--wf-baseline-dir",
+        help="Walk-forward baseline dir.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    wf_hybrid_dir: Path | None = typer.Option(
+        Path("/home/tom/projects/mf_etl/artifacts/backtest_sensitivity_walkforward/wfgrid-8201b6f76d65"),
+        "--wf-hybrid-dir",
+        help="Walk-forward hybrid dir.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    execution_realism_report_dir: Path | None = typer.Option(
+        Path("/home/tom/projects/mf_etl/artifacts/execution_realism_reports/exec-realism-da6f6bec9397_execution_realism_v1"),
+        "--execution-realism-report-dir",
+        help="Optional execution realism report dir to enrich WF comparison fields.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    out_dir: Path | None = typer.Option(
+        None,
+        "--out-dir",
+        help="Optional output directory override.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    min_trades: int = typer.Option(
+        25,
+        "--min-trades",
+        help="Minimum trades required for locked combo selection.",
+        min=1,
+    ),
+    include_exec2: bool = typer.Option(
+        True,
+        "--include-exec2/--no-include-exec2",
+        help="Include optional CANDIDATE_EXEC_2 from A2 grid.",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Build Production Candidate Pack v1 from existing grid/WF artifacts."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = run_production_candidates_build(
+        settings,
+        a1_grid_dir=a1_grid_dir,
+        a2_grid_dir=a2_grid_dir,
+        a3_grid_dir=a3_grid_dir,
+        b_grid_dir=b_grid_dir,
+        c_grid_dir=c_grid_dir,
+        wf_baseline_dir=wf_baseline_dir,
+        wf_hybrid_dir=wf_hybrid_dir,
+        execution_realism_report_dir=execution_realism_report_dir,
+        out_dir=out_dir,
+        min_trades=min_trades,
+        include_exec2=include_exec2,
+        logger=logger,
+    )
+    packet = json.loads(result.policy_packet_path.read_text(encoding="utf-8"))
+    summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+
+    typer.echo(f"run_id: {result.run_id}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo("selected_candidates:")
+    for label, candidate in (packet.get("candidates") or {}).items():
+        strategy = candidate.get("strategy_params", {})
+        overlay = candidate.get("overlay", {})
+        execution = candidate.get("execution_realism", {})
+        snapshot = candidate.get("expected_behavior_snapshot", {})
+        typer.echo(
+            f"{label}: combo={candidate.get('combo_id')} sig={strategy.get('signal_mode')} "
+            f"exit={strategy.get('exit_mode')} hold={strategy.get('hold_bars')} "
+            f"overlay={overlay.get('mode')} exec_profile={execution.get('profile')} "
+            f"trades={snapshot.get('trade_count')} exp={snapshot.get('best_expectancy')} "
+            f"pf={snapshot.get('PF')} rob_v2={snapshot.get('robustness_v2')} ret_cv={snapshot.get('ret_cv')}"
+        )
+    warnings = summary.get("warnings", [])
+    if warnings:
+        typer.echo("warnings:")
+        for warning in warnings:
+            typer.echo(f"- {warning}")
+    typer.echo(f"policy_packet_path: {result.policy_packet_path}")
+    typer.echo(f"candidates_table_path: {result.candidates_table_path}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"report_path: {result.report_path}")
+
+
+@app.command("production-candidates-sanity")
+def production_candidates_sanity(
+    pack_dir: Path = typer.Option(
+        ...,
+        "--pack-dir",
+        help="Production candidate pack directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+) -> None:
+    """Validate production candidate pack artifacts and candidate consistency."""
+
+    summary = summarize_production_candidates_pack(pack_dir)
+    typer.echo(f"pack_dir: {summary.get('pack_dir')}")
+    typer.echo(f"candidate_count: {summary.get('candidate_count')}")
+    typer.echo(f"candidates: {summary.get('candidates')}")
+    warnings = summary.get("warnings", [])
+    errors = summary.get("errors", [])
+    typer.echo(f"warnings: {len(warnings)}")
+    for warning in warnings[:20]:
+        typer.echo(f"- {warning}")
+    typer.echo(f"errors: {len(errors)}")
+    for error in errors[:20]:
+        typer.echo(f"- {error}")
+    typer.echo(f"policy_path: {summary.get('policy_path')}")
+    typer.echo(f"table_path: {summary.get('table_path')}")
+    typer.echo(f"summary_path: {summary.get('summary_path')}")
+    typer.echo(f"report_path: {summary.get('report_path')}")
+    if errors:
+        raise typer.Exit(code=1)
 
 
 def main() -> None:

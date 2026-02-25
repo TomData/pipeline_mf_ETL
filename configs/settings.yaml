@@ -157,6 +157,47 @@ backtest_policy_overlay:
   dedupe_rule: first
   enable_direction_conflict_metrics: true
 
+backtest_execution_realism:
+  default_profile: none
+  profiles:
+    none:
+      min_price: null
+      min_dollar_vol_20: null
+      max_vol_pct: null
+      min_history_bars_for_execution: null
+    lite:
+      min_price: 2.0
+      min_dollar_vol_20: 1000000.0
+      max_vol_pct: 0.12
+      min_history_bars_for_execution: 50
+    strict:
+      min_price: 5.0
+      min_dollar_vol_20: 5000000.0
+      max_vol_pct: 0.08
+      min_history_bars_for_execution: 100
+  dollar_vol_window: 20
+  dollar_vol_rolling_method: median
+  vol_input_unit_mode: auto
+  min_history_bars_default: 50
+  report_min_trades_default: 30
+  report_max_zero_trade_share_default: 0.50
+  report_max_ret_cv_default: 20.0
+
+backtest_execution_calibration:
+  sweep:
+    min_price: [0.0, 1.0, 2.0, 5.0]
+    min_dollar_vol20: [0.0, 250000.0, 500000.0, 1000000.0, 2000000.0]
+    max_vol_pct: [null, 5.0, 8.0, 10.0, 15.0, 20.0, 30.0]
+    min_history_bars: [20, 50]
+  target_lite_eligibility_min: 0.20
+  target_lite_eligibility_max: 0.60
+  target_strict_eligibility_min: 0.05
+  target_strict_eligibility_max: 0.30
+  min_eligible_signals: 100
+  max_single_reason_share: 0.95
+  top_k_recommendations: 5
+  by_year_default: true
+
 backtest_sensitivity:
   progress_every: 10
   max_combos: 500

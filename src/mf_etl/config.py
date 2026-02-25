@@ -265,6 +265,84 @@ class BacktestPolicyOverlayConfig(BaseModel):
     enable_direction_conflict_metrics: bool = True
 
 
+class BacktestExecutionRealismProfileConfig(BaseModel):
+    """One execution realism profile definition."""
+
+    min_price: float | None = Field(default=None, ge=0.0)
+    min_dollar_vol_20: float | None = Field(default=None, ge=0.0)
+    max_vol_pct: float | None = Field(default=None, ge=0.0)
+    min_history_bars_for_execution: int | None = Field(default=None, ge=1)
+
+
+class BacktestExecutionRealismProfilesConfig(BaseModel):
+    """Named execution realism profiles."""
+
+    none: BacktestExecutionRealismProfileConfig = Field(
+        default_factory=BacktestExecutionRealismProfileConfig
+    )
+    lite: BacktestExecutionRealismProfileConfig = Field(
+        default_factory=lambda: BacktestExecutionRealismProfileConfig(
+            min_price=2.0,
+            min_dollar_vol_20=1_000_000.0,
+            max_vol_pct=0.12,
+            min_history_bars_for_execution=50,
+        )
+    )
+    strict: BacktestExecutionRealismProfileConfig = Field(
+        default_factory=lambda: BacktestExecutionRealismProfileConfig(
+            min_price=5.0,
+            min_dollar_vol_20=5_000_000.0,
+            max_vol_pct=0.08,
+            min_history_bars_for_execution=100,
+        )
+    )
+
+
+class BacktestExecutionRealismConfig(BaseModel):
+    """Execution realism filter settings and report thresholds."""
+
+    default_profile: Literal["none", "lite", "strict"] = "none"
+    profiles: BacktestExecutionRealismProfilesConfig = Field(
+        default_factory=BacktestExecutionRealismProfilesConfig
+    )
+    dollar_vol_window: int = Field(default=20, ge=1)
+    dollar_vol_rolling_method: Literal["median", "mean"] = "median"
+    vol_input_unit_mode: Literal["auto", "decimal", "percent_points"] = "auto"
+    min_history_bars_default: int = Field(default=50, ge=1)
+    report_min_trades_default: int = Field(default=30, ge=1)
+    report_max_zero_trade_share_default: float = Field(default=0.50, ge=0.0, le=1.0)
+    report_max_ret_cv_default: float = Field(default=20.0, gt=0.0)
+
+
+class BacktestExecutionCalibrationSweepConfig(BaseModel):
+    """Default threshold sweep ranges for execution realism calibration."""
+
+    min_price: list[float] = Field(default_factory=lambda: [0.0, 1.0, 2.0, 5.0], min_length=1)
+    min_dollar_vol20: list[float] = Field(
+        default_factory=lambda: [0.0, 250_000.0, 500_000.0, 1_000_000.0, 2_000_000.0],
+        min_length=1,
+    )
+    max_vol_pct: list[float | None] = Field(
+        default_factory=lambda: [None, 5.0, 8.0, 10.0, 15.0, 20.0, 30.0],
+        min_length=1,
+    )
+    min_history_bars: list[int] = Field(default_factory=lambda: [20, 50], min_length=1)
+
+
+class BacktestExecutionCalibrationConfig(BaseModel):
+    """Calibration diagnostics and recommendation defaults for realism thresholds."""
+
+    sweep: BacktestExecutionCalibrationSweepConfig = Field(default_factory=BacktestExecutionCalibrationSweepConfig)
+    target_lite_eligibility_min: float = Field(default=0.20, ge=0.0, le=1.0)
+    target_lite_eligibility_max: float = Field(default=0.60, ge=0.0, le=1.0)
+    target_strict_eligibility_min: float = Field(default=0.05, ge=0.0, le=1.0)
+    target_strict_eligibility_max: float = Field(default=0.30, ge=0.0, le=1.0)
+    min_eligible_signals: int = Field(default=100, ge=1)
+    max_single_reason_share: float = Field(default=0.95, ge=0.0, le=1.0)
+    top_k_recommendations: int = Field(default=5, ge=1)
+    by_year_default: bool = True
+
+
 class BacktestSensitivityDefaultGridConfig(BaseModel):
     """Default parameter grid for backtest sensitivity runs."""
 
@@ -530,6 +608,12 @@ class AppSettings(BaseSettings):
     cluster_hardening: ClusterHardeningConfig = Field(default_factory=ClusterHardeningConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     backtest_policy_overlay: BacktestPolicyOverlayConfig = Field(default_factory=BacktestPolicyOverlayConfig)
+    backtest_execution_realism: BacktestExecutionRealismConfig = Field(
+        default_factory=BacktestExecutionRealismConfig
+    )
+    backtest_execution_calibration: BacktestExecutionCalibrationConfig = Field(
+        default_factory=BacktestExecutionCalibrationConfig
+    )
     backtest_sensitivity: BacktestSensitivityConfig = Field(default_factory=BacktestSensitivityConfig)
     research_clustering: ResearchClusteringConfig = Field(default_factory=ResearchClusteringConfig)
     research_hmm: ResearchHMMConfig = Field(default_factory=ResearchHMMConfig)

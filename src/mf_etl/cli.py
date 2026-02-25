@@ -71,6 +71,11 @@ from mf_etl.backtest.pipeline import (
 from mf_etl.backtest.models import InputType
 from mf_etl.backtest.sanity import summarize_backtest_run
 from mf_etl.backtest.sensitivity_models import GridDimensionValues, SourceInputSpec
+from mf_etl.backtest.execution_realism_calibration import (
+    run_execution_realism_calibration,
+    run_execution_realism_calibration_report,
+)
+from mf_etl.backtest.execution_realism_report import run_execution_realism_report
 from mf_etl.backtest.hybrid_eval_report import run_hybrid_eval_report
 from mf_etl.backtest.sensitivity_runner import (
     run_backtest_grid,
@@ -3451,6 +3456,20 @@ def backtest_run(
         "--overlay-join-keys",
         help="Comma-separated join keys. Default: ticker,trade_date",
     ),
+    exec_profile: str | None = typer.Option(
+        None,
+        "--exec-profile",
+        help="Execution realism profile: none, lite, strict.",
+    ),
+    exec_min_price: float | None = typer.Option(None, "--exec-min-price", min=0.0),
+    exec_min_dollar_vol20: float | None = typer.Option(None, "--exec-min-dollar-vol20", min=0.0),
+    exec_max_vol_pct: float | None = typer.Option(None, "--exec-max-vol-pct", min=0.0),
+    exec_min_history_bars: int | None = typer.Option(None, "--exec-min-history-bars", min=1),
+    report_min_trades: int | None = typer.Option(None, "--report-min-trades", min=1),
+    report_max_zero_trade_share: float | None = typer.Option(
+        None, "--report-max-zero-trade-share", min=0.0, max=1.0
+    ),
+    report_max_ret_cv: float | None = typer.Option(None, "--report-max-ret-cv", min=0.0),
     state_map_file: Path | None = typer.Option(
         None,
         "--state-map-file",
@@ -3523,6 +3542,11 @@ def backtest_run(
         allowed={"none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"},
         option_name="overlay-mode",
     )
+    exec_profile_norm = _normalize_choice(
+        exec_profile,
+        allowed={"none", "lite", "strict"},
+        option_name="exec-profile",
+    )
 
     settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
     overlay_keys = (
@@ -3563,6 +3587,17 @@ def backtest_run(
             overlay_mode_norm or settings.backtest_policy_overlay.default_overlay_mode,
         ),
         overlay_join_keys=overlay_keys,
+        execution_profile=cast(
+            str,
+            exec_profile_norm or settings.backtest_execution_realism.default_profile,
+        ),
+        exec_min_price=exec_min_price,
+        exec_min_dollar_vol20=exec_min_dollar_vol20,
+        exec_max_vol_pct=exec_max_vol_pct,
+        exec_min_history_bars=exec_min_history_bars,
+        report_min_trades=report_min_trades,
+        report_max_zero_trade_share=report_max_zero_trade_share,
+        report_max_ret_cv=report_max_ret_cv,
         fee_bps_per_side=(
             fee_bps_per_side if fee_bps_per_side is not None else settings.backtest.fee_bps_per_side
         ),
@@ -3591,6 +3626,11 @@ def backtest_run(
         typer.echo(f"overlay_mode: {overlay_payload.get('overlay_mode')}")
         typer.echo(f"overlay_match_rate: {overlay_payload.get('overlay_match_rate')}")
         typer.echo(f"overlay_vetoed_signal_share: {overlay_payload.get('overlay_vetoed_signal_share')}")
+    execution_payload = payload.get("execution", {}) if isinstance(payload.get("execution"), dict) else {}
+    if execution_payload:
+        typer.echo(f"execution_profile: {execution_payload.get('execution_profile')}")
+        typer.echo(f"exec_eligibility_rate: {execution_payload.get('exec_eligibility_rate')}")
+        typer.echo(f"exec_suppressed_signal_share: {execution_payload.get('exec_suppressed_signal_share')}")
     typer.echo(f"output_dir: {result.output_dir}")
     typer.echo(f"summary_path: {result.summary_path}")
     typer.echo(f"trades_path: {result.trades_path}")
@@ -3636,6 +3676,15 @@ def backtest_sanity(
         typer.echo(
             f"overlay mode={overlay_info.get('overlay_mode')} match_rate={overlay_info.get('overlay_match_rate')} "
             f"veto_share={overlay_info.get('overlay_vetoed_signal_share')} conflict_share={overlay_info.get('overlay_direction_conflict_share')}"
+        )
+    execution_info = summary.get("execution_info")
+    if execution_info is not None:
+        typer.echo(
+            f"execution profile={execution_info.get('execution_profile')} "
+            f"status={execution_info.get('realism_profile_status')} "
+            f"eligibility={execution_info.get('exec_eligibility_rate')} "
+            f"suppressed_share={execution_info.get('exec_suppressed_signal_share')} "
+            f"trade_avg_dv20={execution_info.get('exec_trade_avg_dollar_vol_20')}"
         )
     typer.echo("top_states:")
     for row in summary.get("top_states", [])[:10]:
@@ -3726,6 +3775,20 @@ def backtest_wf_run(
         "--overlay-join-keys",
         help="Comma-separated join keys. Default: ticker,trade_date",
     ),
+    exec_profile: str | None = typer.Option(
+        None,
+        "--exec-profile",
+        help="Execution realism profile: none, lite, strict.",
+    ),
+    exec_min_price: float | None = typer.Option(None, "--exec-min-price", min=0.0),
+    exec_min_dollar_vol20: float | None = typer.Option(None, "--exec-min-dollar-vol20", min=0.0),
+    exec_max_vol_pct: float | None = typer.Option(None, "--exec-max-vol-pct", min=0.0),
+    exec_min_history_bars: int | None = typer.Option(None, "--exec-min-history-bars", min=1),
+    report_min_trades: int | None = typer.Option(None, "--report-min-trades", min=1),
+    report_max_zero_trade_share: float | None = typer.Option(
+        None, "--report-max-zero-trade-share", min=0.0, max=1.0
+    ),
+    report_max_ret_cv: float | None = typer.Option(None, "--report-max-ret-cv", min=0.0),
     signal_mode: str | None = typer.Option(None, "--signal-mode"),
     exit_mode: str | None = typer.Option(None, "--exit-mode"),
     hold_bars: int | None = typer.Option(None, "--hold-bars", min=1),
@@ -3768,6 +3831,11 @@ def backtest_wf_run(
         allowed={"none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"},
         option_name="overlay-mode",
     )
+    exec_profile_norm = _normalize_choice(
+        exec_profile,
+        allowed={"none", "lite", "strict"},
+        option_name="exec-profile",
+    )
     settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
     if (overlay_cluster_file is None) ^ (overlay_cluster_hardening_dir is None):
         raise typer.BadParameter(
@@ -3795,6 +3863,17 @@ def backtest_wf_run(
             overlay_mode_norm or settings.backtest_policy_overlay.default_overlay_mode,
         ),
         overlay_join_keys=overlay_keys,
+        execution_profile=cast(
+            str,
+            exec_profile_norm or settings.backtest_execution_realism.default_profile,
+        ),
+        exec_min_price=exec_min_price,
+        exec_min_dollar_vol20=exec_min_dollar_vol20,
+        exec_max_vol_pct=exec_max_vol_pct,
+        exec_min_history_bars=exec_min_history_bars,
+        report_min_trades=report_min_trades,
+        report_max_zero_trade_share=report_max_zero_trade_share,
+        report_max_ret_cv=report_max_ret_cv,
         signal_mode=(signal_mode_norm or settings.backtest.signal_mode),
         exit_mode=(exit_mode_norm or settings.backtest.exit_mode),
         hold_bars=(hold_bars if hold_bars is not None else settings.backtest.hold_bars),
@@ -3913,6 +3992,20 @@ def backtest_grid_run(
         "--overlay-join-keys",
         help="Comma-separated join keys. Default: ticker,trade_date",
     ),
+    exec_profile: str | None = typer.Option(
+        None,
+        "--exec-profile",
+        help="Execution realism profile: none, lite, strict.",
+    ),
+    exec_min_price: float | None = typer.Option(None, "--exec-min-price", min=0.0),
+    exec_min_dollar_vol20: float | None = typer.Option(None, "--exec-min-dollar-vol20", min=0.0),
+    exec_max_vol_pct: float | None = typer.Option(None, "--exec-max-vol-pct", min=0.0),
+    exec_min_history_bars: int | None = typer.Option(None, "--exec-min-history-bars", min=1),
+    report_min_trades: int | None = typer.Option(None, "--report-min-trades", min=1),
+    report_max_zero_trade_share: float | None = typer.Option(
+        None, "--report-max-zero-trade-share", min=0.0, max=1.0
+    ),
+    report_max_ret_cv: float | None = typer.Option(None, "--report-max-ret-cv", min=0.0),
     state_map_file: Path | None = typer.Option(
         None,
         "--state-map-file",
@@ -3974,6 +4067,11 @@ def backtest_grid_run(
         allowed={"none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"},
         option_name="overlay-mode",
     ) or settings.backtest_policy_overlay.default_overlay_mode
+    exec_profile_norm = _normalize_choice(
+        exec_profile,
+        allowed={"none", "lite", "strict"},
+        option_name="exec-profile",
+    ) or settings.backtest_execution_realism.default_profile
     overlay_join_keys_norm = (
         [part.strip() for part in overlay_join_keys.split(",") if part.strip() != ""]
         if overlay_join_keys
@@ -4085,6 +4183,14 @@ def backtest_grid_run(
         report_top_n=(
             report_top_n if report_top_n is not None else settings.backtest_sensitivity.report_top_n_default
         ),
+        execution_profile=exec_profile_norm,
+        exec_min_price=exec_min_price,
+        exec_min_dollar_vol20=exec_min_dollar_vol20,
+        exec_max_vol_pct=exec_max_vol_pct,
+        exec_min_history_bars=exec_min_history_bars,
+        report_min_trades=report_min_trades,
+        report_max_zero_trade_share=report_max_zero_trade_share,
+        report_max_ret_cv=report_max_ret_cv,
         logger=logger,
     )
     summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
@@ -4098,6 +4204,7 @@ def backtest_grid_run(
     typer.echo(f"zero_trade_combo_share: {summary.get('zero_trade_combo_share')}")
     typer.echo(f"non_finite_cells: {summary.get('non_finite_cells')}")
     typer.echo(f"null_metric_cells: {summary.get('null_metric_cells')}")
+    typer.echo(f"execution_profile: {summary.get('execution_profile')}")
     typer.echo(f"overlay_enabled: {any(bool((s or {}).get('overlay_cluster_file')) for s in summary.get('sources', []))}")
     typer.echo(f"output_dir: {result.output_dir}")
     typer.echo(f"manifest_path: {result.manifest_path}")
@@ -4256,6 +4363,20 @@ def backtest_grid_wf_run(
         "--overlay-join-keys",
         help="Comma-separated join keys. Default: ticker,trade_date",
     ),
+    exec_profile: str | None = typer.Option(
+        None,
+        "--exec-profile",
+        help="Execution realism profile: none, lite, strict.",
+    ),
+    exec_min_price: float | None = typer.Option(None, "--exec-min-price", min=0.0),
+    exec_min_dollar_vol20: float | None = typer.Option(None, "--exec-min-dollar-vol20", min=0.0),
+    exec_max_vol_pct: float | None = typer.Option(None, "--exec-max-vol-pct", min=0.0),
+    exec_min_history_bars: int | None = typer.Option(None, "--exec-min-history-bars", min=1),
+    report_min_trades: int | None = typer.Option(None, "--report-min-trades", min=1),
+    report_max_zero_trade_share: float | None = typer.Option(
+        None, "--report-max-zero-trade-share", min=0.0, max=1.0
+    ),
+    report_max_ret_cv: float | None = typer.Option(None, "--report-max-ret-cv", min=0.0),
     hold_bars_grid: str | None = typer.Option(None, "--hold-bars-grid"),
     signal_mode_grid: str | None = typer.Option(None, "--signal-mode-grid"),
     exit_mode_grid: str | None = typer.Option(None, "--exit-mode-grid"),
@@ -4307,6 +4428,11 @@ def backtest_grid_wf_run(
         allowed={"none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"},
         option_name="overlay-mode",
     ) or settings.backtest_policy_overlay.default_overlay_mode
+    exec_profile_norm = _normalize_choice(
+        exec_profile,
+        allowed={"none", "lite", "strict"},
+        option_name="exec-profile",
+    ) or settings.backtest_execution_realism.default_profile
     overlay_join_keys_norm = (
         [part.strip() for part in overlay_join_keys.split(",") if part.strip() != ""]
         if overlay_join_keys
@@ -4352,6 +4478,14 @@ def backtest_grid_wf_run(
         step_years=step_years,
         sources=sources_norm,
         policy_filter_mode=cast(str, policy_filter_mode_norm),
+        execution_profile=exec_profile_norm,
+        exec_min_price=exec_min_price,
+        exec_min_dollar_vol20=exec_min_dollar_vol20,
+        exec_max_vol_pct=exec_max_vol_pct,
+        exec_min_history_bars=exec_min_history_bars,
+        report_min_trades=report_min_trades,
+        report_max_zero_trade_share=report_max_zero_trade_share,
+        report_max_ret_cv=report_max_ret_cv,
         dimensions=dims,
         max_combos=max_combos,
         shuffle_grid=shuffle_grid,
@@ -4375,6 +4509,7 @@ def backtest_grid_wf_run(
     typer.echo(f"splits_total: {summary.get('splits_total')}")
     typer.echo(f"splits_successful: {summary.get('splits_successful')}")
     typer.echo(f"splits_failed: {summary.get('splits_failed')}")
+    typer.echo(f"execution_profile: {summary.get('execution_profile')}")
     typer.echo(f"output_dir: {result.output_dir}")
     typer.echo(f"manifest_path: {result.manifest_path}")
     typer.echo(f"by_split_path: {result.by_split_path}")
@@ -4388,6 +4523,408 @@ def backtest_grid_wf_run(
     typer.echo(f"overlay_split_summary_path: {result.output_dir / 'wf_overlay_split_summary.csv'}")
     typer.echo(f"overlay_source_summary_path: {result.output_dir / 'wf_overlay_source_summary.csv'}")
     typer.echo(f"overlay_effectiveness_summary_path: {result.output_dir / 'wf_overlay_effectiveness_summary.csv'}")
+    typer.echo(f"report_path: {result.report_path}")
+
+
+@app.command("execution-realism-calibrate")
+def execution_realism_calibrate(
+    source_file: Path = typer.Option(
+        ...,
+        "--source-file",
+        help="Input parquet/csv (HMM decoded rows, FLOW dataset, or CLUSTER rows).",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    source_type: str = typer.Option(
+        "auto",
+        "--source-type",
+        help="Source type: hmm, flow, cluster, auto.",
+    ),
+    state_col: str | None = typer.Option(
+        None,
+        "--state-col",
+        help="Optional state column alias for generic files.",
+    ),
+    validation_run_dir: Path | None = typer.Option(
+        None,
+        "--validation-run-dir",
+        help="Optional validation dir for HMM state-direction inference.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    cluster_hardening_dir: Path | None = typer.Option(
+        None,
+        "--cluster-hardening-dir",
+        help="Cluster hardening dir for primary cluster sources.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    state_map_file: Path | None = typer.Option(
+        None,
+        "--state-map-file",
+        help="Optional state map JSON override.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    overlay_cluster_file: Path | None = typer.Option(
+        None,
+        "--overlay-cluster-file",
+        help="Optional overlay cluster rows file.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    overlay_cluster_hardening_dir: Path | None = typer.Option(
+        None,
+        "--overlay-cluster-hardening-dir",
+        help="Optional overlay cluster hardening directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    cluster_policy_file: Path | None = typer.Option(
+        None,
+        "--cluster-policy-file",
+        help="Optional path to cluster_hardening_policy.json (overlay).",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    overlay_mode: str = typer.Option(
+        "none",
+        "--overlay-mode",
+        help="Overlay mode: none, allow_only, allow_watch, block_veto, allow_or_unknown.",
+    ),
+    overlay_join_keys: str | None = typer.Option(
+        None,
+        "--overlay-join-keys",
+        help="Comma-separated overlay join keys. Default: ticker,trade_date.",
+    ),
+    signal_mode: str | None = typer.Option(
+        None,
+        "--signal-mode",
+        help="Signal mode context for calibration metadata.",
+    ),
+    exec_profile: str | None = typer.Option(
+        None,
+        "--exec-profile",
+        help="Execution realism profile for baseline diagnostics: none, lite, strict.",
+    ),
+    exec_min_price: float | None = typer.Option(None, "--exec-min-price", min=0.0),
+    exec_min_dollar_vol20: float | None = typer.Option(None, "--exec-min-dollar-vol20", min=0.0),
+    exec_max_vol_pct: float | None = typer.Option(None, "--exec-max-vol-pct", min=0.0),
+    exec_min_history_bars: int | None = typer.Option(None, "--exec-min-history-bars", min=1),
+    sample_frac: float | None = typer.Option(None, "--sample-frac", min=0.0, max=1.0),
+    start_date: str | None = typer.Option(None, "--start-date"),
+    end_date: str | None = typer.Option(None, "--end-date"),
+    by_year: bool = typer.Option(
+        False,
+        "--by-year/--no-by-year",
+        help="Write by-year diagnostics tables.",
+    ),
+    out_dir: Path | None = typer.Option(
+        None,
+        "--out-dir",
+        help="Optional explicit output directory.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run execution realism calibration diagnostics + threshold sweep (no PnL backtest)."""
+
+    source_type_norm = _normalize_choice(
+        source_type,
+        allowed={"hmm", "flow", "cluster", "auto"},
+        option_name="source-type",
+    ) or "auto"
+    overlay_mode_norm = _normalize_choice(
+        overlay_mode,
+        allowed={"none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"},
+        option_name="overlay-mode",
+    ) or "none"
+    signal_mode_norm = _normalize_choice(
+        signal_mode,
+        allowed={"state_entry", "state_transition_entry", "state_persistence_confirm"},
+        option_name="signal-mode",
+    ) or "state_transition_entry"
+    exec_profile_norm = _normalize_choice(
+        exec_profile,
+        allowed={"none", "lite", "strict"},
+        option_name="exec-profile",
+    )
+    start_date_norm = _parse_iso_date(start_date, "start-date")
+    end_date_norm = _parse_iso_date(end_date, "end-date")
+    if start_date_norm and end_date_norm and start_date_norm > end_date_norm:
+        raise typer.BadParameter("start-date must be <= end-date.")
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    by_year_effective = by_year or bool(settings.backtest_execution_calibration.by_year_default)
+    overlay_join_keys_norm = (
+        [part.strip() for part in overlay_join_keys.split(",") if part.strip() != ""]
+        if overlay_join_keys
+        else list(settings.backtest_policy_overlay.join_keys)
+    )
+
+    result = run_execution_realism_calibration(
+        settings,
+        source_file=source_file,
+        source_type=cast(str, source_type_norm),
+        state_col=state_col,
+        validation_run_dir=validation_run_dir,
+        cluster_hardening_dir=cluster_hardening_dir,
+        state_map_file=state_map_file,
+        overlay_cluster_file=overlay_cluster_file,
+        overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
+        cluster_policy_file=cluster_policy_file,
+        overlay_mode=cast(str, overlay_mode_norm),
+        overlay_join_keys=overlay_join_keys_norm,
+        signal_mode=cast(str, signal_mode_norm),
+        execution_profile=cast(
+            str,
+            exec_profile_norm or settings.backtest_execution_realism.default_profile,
+        ),
+        exec_min_price=exec_min_price,
+        exec_min_dollar_vol20=exec_min_dollar_vol20,
+        exec_max_vol_pct=exec_max_vol_pct,
+        exec_min_history_bars=exec_min_history_bars,
+        report_min_trades=None,
+        report_max_zero_trade_share=None,
+        report_max_ret_cv=None,
+        sample_frac=sample_frac,
+        start_date=start_date_norm,
+        end_date=end_date_norm,
+        by_year=bool(by_year_effective),
+        out_dir=out_dir,
+        logger=logger,
+    )
+
+    payload = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    waterfall = payload.get("waterfall", {})
+    units = payload.get("units", {})
+    rec = json.loads(result.recommendations_path.read_text(encoding="utf-8"))
+    typer.echo(f"run_id: {payload.get('run_id')}")
+    typer.echo(f"source_type: {payload.get('source_type')}")
+    typer.echo(f"rows_post_preparation: {payload.get('rows_post_preparation')}")
+    typer.echo(
+        f"candidate/eligible/suppressed: {waterfall.get('candidate_signals_total')}/"
+        f"{waterfall.get('eligible_signals_total')}/{waterfall.get('suppressed_signals_total')}"
+    )
+    typer.echo(f"eligible_rate: {waterfall.get('eligible_rate')}")
+    typer.echo(f"vol_metric_source: {units.get('vol_metric_source')}")
+    typer.echo(f"vol_unit_detected: {units.get('vol_unit_detected')}")
+    typer.echo(
+        f"vol_threshold_effective_decimal: {units.get('vol_threshold_effective_decimal')}"
+    )
+    lite_best = (rec.get("lite", {}) or {}).get("recommended")
+    strict_best = (rec.get("strict", {}) or {}).get("recommended")
+    typer.echo(f"lite_recommended: {lite_best}")
+    typer.echo(f"strict_recommended: {strict_best}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"grid_path: {result.grid_path}")
+    typer.echo(f"recommendations_path: {result.recommendations_path}")
+    typer.echo(f"report_path: {result.report_path}")
+
+
+@app.command("execution-realism-calibration-report")
+def execution_realism_calibration_report(
+    calibration_dir: Path | None = typer.Option(
+        None,
+        "--calibration-dir",
+        help="Existing calibration directory. If omitted, latest is used.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Render markdown report from existing execution calibration artifacts."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    resolved_dir = calibration_dir
+    if resolved_dir is None:
+        root = settings.paths.artifacts_root / "execution_realism_calibration"
+        candidates = sorted(root.glob("exec-calib-*"), key=lambda p: p.stat().st_mtime, reverse=True) if root.exists() else []
+        if not candidates:
+            raise typer.BadParameter(
+                "No calibration directories found. Run execution-realism-calibrate first or provide --calibration-dir."
+            )
+        resolved_dir = candidates[0]
+    result = run_execution_realism_calibration_report(
+        settings,
+        calibration_dir=resolved_dir,
+        logger=logger,
+    )
+    summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    wf = summary.get("waterfall", {})
+    typer.echo(f"calibration_dir: {result.calibration_dir}")
+    typer.echo(f"candidate_signals_total: {wf.get('candidate_signals_total')}")
+    typer.echo(f"eligible_signals_total: {wf.get('eligible_signals_total')}")
+    typer.echo(f"suppressed_signals_total: {wf.get('suppressed_signals_total')}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"report_path: {result.report_path}")
+
+
+@app.command("execution-realism-report")
+def execution_realism_report(
+    hmm_none_grid_dir: Path | None = typer.Option(
+        None,
+        "--hmm-none-grid-dir",
+        help="Optional HMM baseline grid dir (exec-profile none).",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    hmm_lite_grid_dir: Path | None = typer.Option(
+        None,
+        "--hmm-lite-grid-dir",
+        help="Optional HMM baseline grid dir (exec-profile lite).",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    hmm_strict_grid_dir: Path | None = typer.Option(
+        None,
+        "--hmm-strict-grid-dir",
+        help="Optional HMM baseline grid dir (exec-profile strict).",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    hmm_overlay_allow_lite_grid_dir: Path | None = typer.Option(
+        None,
+        "--hmm-overlay-allow-lite-grid-dir",
+        help="Optional HMM + overlay allow_only + lite grid dir.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    hmm_overlay_block_lite_grid_dir: Path | None = typer.Option(
+        None,
+        "--hmm-overlay-block-lite-grid-dir",
+        help="Optional HMM + overlay block_veto + lite grid dir.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    wf_hmm_baseline_lite_dir: Path | None = typer.Option(
+        None,
+        "--wf-hmm-baseline-lite-dir",
+        help="Optional WF HMM baseline dir under lite execution profile.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    wf_hmm_hybrid_lite_dir: Path | None = typer.Option(
+        None,
+        "--wf-hmm-hybrid-lite-dir",
+        help="Optional WF HMM hybrid allow_only dir under lite execution profile.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Build execution realism evaluation report from existing grid/WF artifacts."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = run_execution_realism_report(
+        settings,
+        hmm_none_grid_dir=hmm_none_grid_dir,
+        hmm_lite_grid_dir=hmm_lite_grid_dir,
+        hmm_strict_grid_dir=hmm_strict_grid_dir,
+        hmm_overlay_allow_lite_grid_dir=hmm_overlay_allow_lite_grid_dir,
+        hmm_overlay_block_lite_grid_dir=hmm_overlay_block_lite_grid_dir,
+        wf_hmm_baseline_lite_dir=wf_hmm_baseline_lite_dir,
+        wf_hmm_hybrid_lite_dir=wf_hmm_hybrid_lite_dir,
+        logger=logger,
+    )
+    summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    table = pl.read_csv(result.table_path)
+    if "candidate_score" in table.columns:
+        table = table.sort("candidate_score", descending=True, nulls_last=True)
+    compact = table.select(
+        [
+            col
+            for col in [
+                "run_label",
+                "execution_profile",
+                "overlay_mode",
+                "candidate_score",
+                "best_expectancy",
+                "best_pf",
+                "best_robustness_v2",
+                "best_ret_cv",
+                "exec_eligibility_rate",
+                "exec_suppressed_signal_share",
+            ]
+            if col in table.columns
+        ]
+    ).head(8)
+    verdicts = summary.get("final_verdicts", {})
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(
+        "recommendation: "
+        f"PRIMARY_CANDIDATE={verdicts.get('PRIMARY_CANDIDATE')} "
+        f"SECONDARY_CANDIDATE={verdicts.get('SECONDARY_CANDIDATE')} "
+        f"REALISM_SENSITIVITY_NOTE={verdicts.get('REALISM_SENSITIVITY_NOTE')}"
+    )
+    typer.echo("top_runs:")
+    for row in compact.to_dicts():
+        typer.echo(
+            f"run={row.get('run_label')} profile={row.get('execution_profile')} mode={row.get('overlay_mode')} "
+            f"score={row.get('candidate_score')} exp={row.get('best_expectancy')} pf={row.get('best_pf')} "
+            f"rob_v2={row.get('best_robustness_v2')} ret_cv={row.get('best_ret_cv')} "
+            f"exec_elig={row.get('exec_eligibility_rate')} exec_supp={row.get('exec_suppressed_signal_share')}"
+        )
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"table_path: {result.table_path}")
+    typer.echo(f"wf_table_path: {result.wf_table_path}")
     typer.echo(f"report_path: {result.report_path}")
 
 

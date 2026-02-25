@@ -181,37 +181,53 @@ def normalize_backtest_input(
     deduped_rows = before_dedupe - cleaned.height
 
     built_ts = datetime.now(timezone.utc)
-    normalized = cleaned.select(
-        [
-            pl.col("ticker").cast(pl.String).str.strip_chars().str.to_uppercase().alias("ticker"),
-            pl.col("exchange").cast(pl.String).str.strip_chars().str.to_uppercase().alias("exchange"),
-            pl.col("trade_date").cast(pl.Date),
-            pl.col("trade_dt").cast(pl.Datetime("us"), strict=False),
-            pl.col("open").cast(pl.Float64, strict=False).alias("open"),
-            pl.col("high").cast(pl.Float64, strict=False).alias("high"),
-            pl.col("low").cast(pl.Float64, strict=False).alias("low"),
-            pl.col("close").cast(pl.Float64, strict=False).alias("close"),
-            pl.col("state_source").cast(pl.String),
-            pl.col("state_id").cast(pl.Int32, strict=False),
-            pl.col("state_label").cast(pl.String),
-            pl.lit("UNCONFIRMED").alias("state_direction_hint"),
-            pl.lit("NA").alias("state_class"),
-            pl.lit(None).cast(pl.Float64).alias("state_score"),
-            pl.lit(False).alias("signal_eligible"),
-            _optional_confidence_column(cleaned),
-            pl.concat_str(
-                [
-                    pl.col("ticker").cast(pl.String),
-                    pl.col("trade_date").cast(pl.String),
-                    pl.col("state_source").cast(pl.String),
-                    pl.col("state_id").cast(pl.String),
-                ],
-                separator="|",
-            ).alias("row_id"),
-            pl.col("run_id").cast(pl.String, strict=False),
-            pl.lit(built_ts).cast(pl.Datetime("us")).alias("built_ts"),
-        ]
-    ).sort(["ticker", "trade_date"])
+    exprs: list[pl.Expr] = [
+        pl.col("ticker").cast(pl.String).str.strip_chars().str.to_uppercase().alias("ticker"),
+        pl.col("exchange").cast(pl.String).str.strip_chars().str.to_uppercase().alias("exchange"),
+        pl.col("trade_date").cast(pl.Date),
+        pl.col("trade_dt").cast(pl.Datetime("us"), strict=False),
+        pl.col("open").cast(pl.Float64, strict=False).alias("open"),
+        pl.col("high").cast(pl.Float64, strict=False).alias("high"),
+        pl.col("low").cast(pl.Float64, strict=False).alias("low"),
+        pl.col("close").cast(pl.Float64, strict=False).alias("close"),
+        pl.col("state_source").cast(pl.String),
+        pl.col("state_id").cast(pl.Int32, strict=False),
+        pl.col("state_label").cast(pl.String),
+        pl.lit("UNCONFIRMED").alias("state_direction_hint"),
+        pl.lit("NA").alias("state_class"),
+        pl.lit(None).cast(pl.Float64).alias("state_score"),
+        pl.lit(False).alias("signal_eligible"),
+        _optional_confidence_column(cleaned),
+        pl.concat_str(
+            [
+                pl.col("ticker").cast(pl.String),
+                pl.col("trade_date").cast(pl.String),
+                pl.col("state_source").cast(pl.String),
+                pl.col("state_id").cast(pl.String),
+            ],
+            separator="|",
+        ).alias("row_id"),
+        pl.col("run_id").cast(pl.String, strict=False),
+        pl.lit(built_ts).cast(pl.Datetime("us")).alias("built_ts"),
+    ]
+    if "volume" in cleaned.columns:
+        exprs.append(pl.col("volume").cast(pl.Float64, strict=False).alias("volume"))
+    else:
+        exprs.append(pl.lit(None).cast(pl.Float64).alias("volume"))
+    if "atr_pct_14" in cleaned.columns:
+        exprs.append(pl.col("atr_pct_14").cast(pl.Float64, strict=False).alias("atr_pct_14"))
+    else:
+        exprs.append(pl.lit(None).cast(pl.Float64).alias("atr_pct_14"))
+    if "fwd_ret_10" in cleaned.columns:
+        exprs.append(pl.col("fwd_ret_10").cast(pl.Float64, strict=False).alias("fwd_ret_10"))
+    else:
+        exprs.append(pl.lit(None).cast(pl.Float64).alias("fwd_ret_10"))
+    if "timeframe" in cleaned.columns:
+        exprs.append(pl.col("timeframe").cast(pl.String).alias("timeframe"))
+    else:
+        exprs.append(pl.lit(None).cast(pl.String).alias("timeframe"))
+
+    normalized = cleaned.select(exprs).sort(["ticker", "trade_date"])
 
     summary = {
         "input_file": str(input_file),

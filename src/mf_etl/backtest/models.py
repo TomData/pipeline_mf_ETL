@@ -15,6 +15,7 @@ EquityMode = Literal["event_returns_only", "daily_equity_curve"]
 DirectionHint = Literal["LONG_BIAS", "SHORT_BIAS", "UNCONFIRMED"]
 PolicyFilterMode = Literal["allow_only", "allow_watch", "all_states"]
 OverlayMode = Literal["none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"]
+ExecutionProfileName = Literal["none", "lite", "strict"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +36,14 @@ class BacktestRunConfig:
     overlay_cluster_hardening_dir: Path | None
     overlay_mode: OverlayMode
     overlay_join_keys: list[str]
+    execution_profile: ExecutionProfileName
+    exec_min_price: float | None
+    exec_min_dollar_vol20: float | None
+    exec_max_vol_pct: float | None
+    exec_min_history_bars: int | None
+    report_min_trades: int | None
+    report_max_zero_trade_share: float | None
+    report_max_ret_cv: float | None
     fee_bps_per_side: float
     slippage_bps_per_side: float
     equity_mode: EquityMode

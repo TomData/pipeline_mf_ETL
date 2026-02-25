@@ -44,6 +44,9 @@ def render_grid_report(
     lines.append(f"- failed_combos: `{summary.get('failed_combos')}`")
     lines.append(f"- zero_trade_combos: `{summary.get('zero_trade_combos')}`")
     lines.append(f"- zero_trade_combo_share: `{summary.get('zero_trade_combo_share')}`")
+    lines.append(
+        f"- realism_profile_broken_for_universe: `{summary.get('realism_profile_broken_for_universe')}`"
+    )
     lines.append(f"- non_finite_cells: `{summary.get('non_finite_cells')}`")
     lines.append(f"- null_metric_cells: `{summary.get('null_metric_cells')}`")
     lines.append("")
@@ -115,6 +118,9 @@ def render_grid_compare_report(
     lines.append("- Overlap columns compare top-N parameter signatures between runs.")
     lines.append("- Overlay delta columns compare each run against the top-ranked run in this table.")
     lines.append("- `overlay_verdict` is heuristic: HELPFUL / NEUTRAL / HARMFUL.")
+    lines.append(
+        "- `realism_verdict` is heuristic: EDGE_RETAINED / EDGE_COMPROMISED_BUT_CLEANER / TOO_FRAGILE_UNDER_REALISM / NOT_TRADABLE."
+    )
     lines.append("- Compare ret_cv / downside metrics and zero-trade rates before selecting candidates.")
     lines.append("")
     return "\n".join(lines) + "\n"

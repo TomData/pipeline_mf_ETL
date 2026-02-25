@@ -302,6 +302,11 @@ def _to_manifest_row(
     adapter = (summary_payload or {}).get("adapter_summary", {})
     mapping = (summary_payload or {}).get("mapping_summary", {})
     overlay = (summary_payload or {}).get("overlay", {}) if isinstance((summary_payload or {}).get("overlay"), dict) else {}
+    execution = (
+        (summary_payload or {}).get("execution", {})
+        if isinstance((summary_payload or {}).get("execution"), dict)
+        else {}
+    )
 
     def metric(name: str) -> float | None:
         return _safe_float(headline.get(name))
@@ -393,6 +398,42 @@ def _to_manifest_row(
         "overlay_direction_conflict_share": _safe_float(
             overlay.get("overlay_direction_conflict_share")
         ),
+        "execution_profile": execution.get("execution_profile"),
+        "execution_filters_enabled": bool(execution.get("execution_filters_enabled", False)),
+        "exec_vol_metric_source": execution.get("vol_metric_source"),
+        "exec_vol_unit_detected": execution.get("vol_unit_detected"),
+        "exec_vol_threshold_input": _safe_float(execution.get("vol_threshold_input")),
+        "exec_vol_threshold_effective_decimal": _safe_float(
+            execution.get("vol_threshold_effective_decimal")
+        ),
+        "exec_vol_threshold_effective_pct": _safe_float(
+            execution.get("vol_threshold_effective_pct")
+        ),
+        "realism_profile_status": execution.get("realism_profile_status"),
+        "exec_candidate_signals_before_filters": int(
+            execution.get("candidate_signals_before_filters", 0) or 0
+        ),
+        "exec_candidate_signals_after_filters": int(
+            execution.get("candidate_signals_after_filters", 0) or 0
+        ),
+        "exec_suppressed_signal_count": int(execution.get("exec_suppressed_signal_count", 0) or 0),
+        "exec_eligibility_rate": _safe_float(execution.get("exec_eligibility_rate")),
+        "exec_suppressed_signal_share": _safe_float(execution.get("exec_suppressed_signal_share")),
+        "exec_suppressed_by_price_count": int(execution.get("exec_suppressed_by_price_count", 0) or 0),
+        "exec_suppressed_by_liquidity_count": int(
+            execution.get("exec_suppressed_by_liquidity_count", 0) or 0
+        ),
+        "exec_suppressed_by_vol_count": int(execution.get("exec_suppressed_by_vol_count", 0) or 0),
+        "exec_suppressed_by_warmup_count": int(execution.get("exec_suppressed_by_warmup_count", 0) or 0),
+        "exec_suppressed_by_liquidity_share": _safe_float(
+            execution.get("exec_suppressed_by_liquidity_share")
+        ),
+        "exec_suppressed_by_price_share": _safe_float(execution.get("exec_suppressed_by_price_share")),
+        "exec_suppressed_by_vol_share": _safe_float(execution.get("exec_suppressed_by_vol_share")),
+        "exec_suppressed_by_warmup_share": _safe_float(execution.get("exec_suppressed_by_warmup_share")),
+        "exec_trade_avg_dollar_vol_20": _safe_float(execution.get("exec_trade_avg_dollar_vol_20")),
+        "exec_trade_p10_dollar_vol_20": _safe_float(execution.get("exec_trade_p10_dollar_vol_20")),
+        "exec_trade_avg_vol_pct": _safe_float(execution.get("exec_trade_avg_vol_pct")),
         "built_ts": (summary_payload or {}).get("finished_ts"),
     }
 
@@ -452,6 +493,14 @@ def run_backtest_grid(
     include_ret_cv: bool = True,
     include_tail_metrics: bool = True,
     report_top_n: int = 10,
+    execution_profile: str = "none",
+    exec_min_price: float | None = None,
+    exec_min_dollar_vol20: float | None = None,
+    exec_max_vol_pct: float | None = None,
+    exec_min_history_bars: int | None = None,
+    report_min_trades: int | None = None,
+    report_max_zero_trade_share: float | None = None,
+    report_max_ret_cv: float | None = None,
     logger: logging.Logger | None = None,
     output_dir_override: Path | None = None,
     grid_run_id_override: str | None = None,
@@ -536,6 +585,14 @@ def run_backtest_grid(
                     overlay_cluster_hardening_dir=actual_spec.overlay_cluster_hardening_dir,
                     overlay_mode=actual_spec.overlay_mode,
                     overlay_join_keys=actual_spec.overlay_join_keys,
+                    execution_profile=execution_profile,  # type: ignore[arg-type]
+                    exec_min_price=exec_min_price,
+                    exec_min_dollar_vol20=exec_min_dollar_vol20,
+                    exec_max_vol_pct=exec_max_vol_pct,
+                    exec_min_history_bars=exec_min_history_bars,
+                    report_min_trades=report_min_trades,
+                    report_max_zero_trade_share=report_max_zero_trade_share,
+                    report_max_ret_cv=report_max_ret_cv,
                     fee_bps_per_side=combo.fee_bps_per_side,
                     slippage_bps_per_side=combo.slippage_bps_per_side,
                     equity_mode=combo.equity_mode,
@@ -650,6 +707,20 @@ def run_backtest_grid(
     zero_trade_combos = (
         int(metrics_table.filter(pl.col("is_zero_trade_combo") == True).height) if metrics_table.height > 0 else 0
     )
+    realism_profile_broken_for_universe = False
+    if execution_profile != "none" and metrics_table.height > 0:
+        success_df = metrics_table.filter(pl.col("status") == "SUCCESS")
+        if success_df.height > 0:
+            with_candidate = success_df.filter(
+                pl.col("exec_candidate_signals_before_filters").cast(pl.Int64, strict=False) > 0
+            )
+            if with_candidate.height > 0:
+                zero_after = int(
+                    with_candidate.filter(
+                        pl.col("exec_candidate_signals_after_filters").cast(pl.Int64, strict=False) <= 0
+                    ).height
+                )
+                realism_profile_broken_for_universe = (zero_after == with_candidate.height)
     non_finite_cells = 0
     null_metric_cells = 0
     if metrics_table.height > 0:
@@ -676,6 +747,7 @@ def run_backtest_grid(
         "skipped_combos": skipped,
         "zero_trade_combos": zero_trade_combos,
         "zero_trade_combo_share": _safe_float((zero_trade_combos / successful) if successful > 0 else None),
+        "realism_profile_broken_for_universe": realism_profile_broken_for_universe,
         "non_finite_cells": non_finite_cells,
         "null_metric_cells": null_metric_cells,
         "sources": [
@@ -708,6 +780,18 @@ def run_backtest_grid(
         "include_ret_cv": include_ret_cv,
         "include_tail_metrics": include_tail_metrics,
         "report_top_n": report_top_n,
+        "execution_profile": execution_profile,
+        "exec_overrides": {
+            "exec_min_price": exec_min_price,
+            "exec_min_dollar_vol20": exec_min_dollar_vol20,
+            "exec_max_vol_pct": exec_max_vol_pct,
+            "exec_min_history_bars": exec_min_history_bars,
+        },
+        "report_threshold_overrides": {
+            "report_min_trades": report_min_trades,
+            "report_max_zero_trade_share": report_max_zero_trade_share,
+            "report_max_ret_cv": report_max_ret_cv,
+        },
     }
 
     config_path = output_dir / "grid_run_config.json"
@@ -862,6 +946,45 @@ def run_backtest_grid_compare(
             if metrics_df.height > 0 and "overlay_direction_conflict_share" in metrics_df.columns
             else None
         )
+        exec_profile_set = (
+            sorted(set(str(v) for v in metrics_df.get_column("execution_profile").drop_nulls().to_list()))
+            if metrics_df.height > 0 and "execution_profile" in metrics_df.columns
+            else []
+        )
+        execution_filters_enabled_share = (
+            _safe_float(
+                metrics_df.select(
+                    pl.col("execution_filters_enabled").cast(pl.Float64, strict=False).mean()
+                ).item()
+            )
+            if metrics_df.height > 0 and "execution_filters_enabled" in metrics_df.columns
+            else None
+        )
+        exec_eligibility_rate_mean = (
+            _safe_float(
+                metrics_df.select(pl.col("exec_eligibility_rate").cast(pl.Float64, strict=False).mean()).item()
+            )
+            if metrics_df.height > 0 and "exec_eligibility_rate" in metrics_df.columns
+            else None
+        )
+        exec_suppressed_signal_share_mean = (
+            _safe_float(
+                metrics_df.select(
+                    pl.col("exec_suppressed_signal_share").cast(pl.Float64, strict=False).mean()
+                ).item()
+            )
+            if metrics_df.height > 0 and "exec_suppressed_signal_share" in metrics_df.columns
+            else None
+        )
+        exec_trade_avg_dollar_vol_20_mean = (
+            _safe_float(
+                metrics_df.select(
+                    pl.col("exec_trade_avg_dollar_vol_20").cast(pl.Float64, strict=False).mean()
+                ).item()
+            )
+            if metrics_df.height > 0 and "exec_trade_avg_dollar_vol_20" in metrics_df.columns
+            else None
+        )
         overlay_modes = (
             sorted(set(str(v) for v in metrics_df.get_column("overlay_mode").drop_nulls().to_list()))
             if metrics_df.height > 0 and "overlay_mode" in metrics_df.columns
@@ -931,6 +1054,7 @@ def run_backtest_grid_compare(
                 "best_robustness_score_v1": best_row.get("robustness_score_v1"),
                 "best_robustness_score_v2": best_row.get("robustness_score_v2"),
                 "best_zero_trade": best_row.get("is_zero_trade_combo"),
+                "best_trade_count": best_row.get("trade_count"),
                 "expectancy_mean": expectancy_mean,
                 "profit_factor_mean": pf_mean,
                 "robustness_v2_mean": robustness_v2_mean,
@@ -942,6 +1066,11 @@ def run_backtest_grid_compare(
                 "overlay_match_rate_mean": overlay_match_rate_mean,
                 "overlay_vetoed_signal_share_mean": overlay_veto_share_mean,
                 "overlay_direction_conflict_share_mean": overlay_conflict_share_mean,
+                "execution_profile_set": ",".join(exec_profile_set),
+                "execution_filters_enabled_share": execution_filters_enabled_share,
+                "exec_eligibility_rate_mean": exec_eligibility_rate_mean,
+                "exec_suppressed_signal_share_mean": exec_suppressed_signal_share_mean,
+                "exec_trade_avg_dollar_vol_20_mean": exec_trade_avg_dollar_vol_20_mean,
                 "cost_fragility_expect_slope_mean": _safe_float(fragility_df.select(pl.col("expectancy_slope_per_10bps").cast(pl.Float64, strict=False).mean()).item()) if fragility_df.height > 0 and "expectancy_slope_per_10bps" in fragility_df.columns else None,
                 "cost_fragility_pf_slope_mean": _safe_float(fragility_df.select(pl.col("profit_factor_slope_per_10bps").cast(pl.Float64, strict=False).mean()).item()) if fragility_df.height > 0 and "profit_factor_slope_per_10bps" in fragility_df.columns else None,
                 "source_summary_rows": int(source_summary.height),
@@ -969,6 +1098,8 @@ def run_backtest_grid_compare(
         base_pf = _safe_float(baseline.get("profit_factor_mean"))
         base_ret_cv = _safe_float(baseline.get("ret_cv_median"))
         base_rob = _safe_float(baseline.get("robustness_v2_mean"))
+        base_exec_elig = _safe_float(baseline.get("exec_eligibility_rate_mean"))
+        base_exec_supp = _safe_float(baseline.get("exec_suppressed_signal_share_mean"))
         table = table.with_columns(
             (
                 pl.col("expectancy_mean").cast(pl.Float64, strict=False)
@@ -986,6 +1117,14 @@ def run_backtest_grid_compare(
                 pl.col("robustness_v2_mean").cast(pl.Float64, strict=False)
                 - pl.lit(base_rob).cast(pl.Float64, strict=False)
             ).alias("delta_robustness_v2_vs_top"),
+            (
+                pl.col("exec_eligibility_rate_mean").cast(pl.Float64, strict=False)
+                - pl.lit(base_exec_elig).cast(pl.Float64, strict=False)
+            ).alias("delta_exec_eligibility_rate_vs_top"),
+            (
+                pl.col("exec_suppressed_signal_share_mean").cast(pl.Float64, strict=False)
+                - pl.lit(base_exec_supp).cast(pl.Float64, strict=False)
+            ).alias("delta_exec_suppressed_signal_share_vs_top"),
         ).with_columns(
             pl.when(
                 (pl.col("delta_expectancy_vs_top") > 0)
@@ -1001,6 +1140,27 @@ def run_backtest_grid_compare(
             .then(pl.lit("NEUTRAL"))
             .otherwise(pl.lit("HARMFUL"))
             .alias("overlay_verdict")
+        ).with_columns(
+            pl.when(
+                (pl.col("best_zero_trade").cast(pl.Boolean).fill_null(False))
+                | (pl.col("best_trade_count").cast(pl.Int64, strict=False).fill_null(0) <= 0)
+            )
+            .then(pl.lit("NOT_TRADABLE"))
+            .when(
+                (pl.col("delta_expectancy_vs_top") >= -0.001)
+                & (pl.col("delta_pf_vs_top") >= -0.05)
+                & (pl.col("delta_robustness_v2_vs_top") >= -2.0)
+                & (pl.col("delta_exec_suppressed_signal_share_vs_top") <= 0.10)
+            )
+            .then(pl.lit("EDGE_RETAINED"))
+            .when(
+                (pl.col("delta_expectancy_vs_top") < 0)
+                & (pl.col("delta_ret_cv_vs_top") < 0)
+                & (pl.col("delta_exec_suppressed_signal_share_vs_top") <= 0.35)
+            )
+            .then(pl.lit("EDGE_COMPROMISED_BUT_CLEANER"))
+            .otherwise(pl.lit("TOO_FRAGILE_UNDER_REALISM"))
+            .alias("realism_verdict")
         )
     overlap_df = pl.DataFrame(overlap_rows) if overlap_rows else pl.DataFrame()
 
@@ -1066,6 +1226,14 @@ def run_backtest_grid_walkforward(
     step_years: int | None,
     sources: list[str] | None,
     policy_filter_mode: PolicyFilterMode,
+    execution_profile: str,
+    exec_min_price: float | None,
+    exec_min_dollar_vol20: float | None,
+    exec_max_vol_pct: float | None,
+    exec_min_history_bars: int | None,
+    report_min_trades: int | None,
+    report_max_zero_trade_share: float | None,
+    report_max_ret_cv: float | None,
     dimensions: GridDimensionValues | None,
     max_combos: int | None,
     shuffle_grid: bool,
@@ -1127,6 +1295,8 @@ def run_backtest_grid_walkforward(
                     "comparability_label": None,
                     "zero_trade_combo_share": None,
                     "robustness_score_v2_mean": None,
+                    "exec_eligibility_rate_mean": None,
+                    "exec_suppressed_signal_share_mean": None,
                     "error": split.get("error"),
                 }
             )
@@ -1213,6 +1383,14 @@ def run_backtest_grid_walkforward(
                 include_ret_cv=True,
                 include_tail_metrics=True,
                 report_top_n=report_top_n,
+                execution_profile=execution_profile,
+                exec_min_price=exec_min_price,
+                exec_min_dollar_vol20=exec_min_dollar_vol20,
+                exec_max_vol_pct=exec_max_vol_pct,
+                exec_min_history_bars=exec_min_history_bars,
+                report_min_trades=report_min_trades,
+                report_max_zero_trade_share=report_max_zero_trade_share,
+                report_max_ret_cv=report_max_ret_cv,
                 logger=effective_logger,
                 output_dir_override=split_dir,
                 grid_run_id_override=f"{wf_grid_id}-{train_end}",
@@ -1228,6 +1406,8 @@ def run_backtest_grid_walkforward(
                     "comparability_label": split_summary.get("comparability"),
                     "zero_trade_combo_share": split_summary.get("zero_trade_combo_share"),
                     "robustness_score_v2_mean": None,
+                    "exec_eligibility_rate_mean": None,
+                    "exec_suppressed_signal_share_mean": None,
                     "error": None,
                 }
             )
@@ -1237,6 +1417,14 @@ def run_backtest_grid_walkforward(
                 split_rows[-1]["robustness_score_v2_mean"] = _safe_float(
                     metrics_df.select(pl.col("robustness_score_v2").cast(pl.Float64, strict=False).mean()).item()
                 )
+                split_rows[-1]["exec_eligibility_rate_mean"] = _safe_float(
+                    metrics_df.select(pl.col("exec_eligibility_rate").cast(pl.Float64, strict=False).mean()).item()
+                ) if "exec_eligibility_rate" in metrics_df.columns else None
+                split_rows[-1]["exec_suppressed_signal_share_mean"] = _safe_float(
+                    metrics_df.select(
+                        pl.col("exec_suppressed_signal_share").cast(pl.Float64, strict=False).mean()
+                    ).item()
+                ) if "exec_suppressed_signal_share" in metrics_df.columns else None
         except Exception as exc:
             failures.append(
                 {
@@ -1255,6 +1443,8 @@ def run_backtest_grid_walkforward(
                     "comparability_label": None,
                     "zero_trade_combo_share": None,
                     "robustness_score_v2_mean": None,
+                    "exec_eligibility_rate_mean": None,
+                    "exec_suppressed_signal_share_mean": None,
                     "error": str(exc),
                 }
             )
@@ -1292,6 +1482,14 @@ def run_backtest_grid_walkforward(
                 pl.col("win_rate").cast(pl.Float64, strict=False).mean().alias("win_rate_mean"),
                 pl.col("trade_count").cast(pl.Float64, strict=False).mean().alias("trade_count_mean"),
                 pl.col("is_zero_trade_combo").cast(pl.Float64, strict=False).mean().alias("zero_trade_combo_share"),
+                pl.col("exec_eligibility_rate")
+                .cast(pl.Float64, strict=False)
+                .mean()
+                .alias("exec_eligibility_rate_mean"),
+                pl.col("exec_suppressed_signal_share")
+                .cast(pl.Float64, strict=False)
+                .mean()
+                .alias("exec_suppressed_signal_share_mean"),
                 pl.col("train_end").n_unique().alias("split_count"),
             )
             .sort(["source_type", "robustness_v2_mean"], descending=[False, True])
@@ -1310,6 +1508,14 @@ def run_backtest_grid_walkforward(
                 pl.col("robustness_score_v2").cast(pl.Float64, strict=False).mean().alias("robustness_v2_mean"),
                 pl.col("is_zero_trade_combo").cast(pl.Float64, strict=False).mean().alias("zero_trade_combo_share"),
                 pl.col("nan_warning_total").cast(pl.Float64, strict=False).sum().alias("nan_warning_total_sum"),
+                pl.col("exec_eligibility_rate")
+                .cast(pl.Float64, strict=False)
+                .mean()
+                .alias("exec_eligibility_rate_mean"),
+                pl.col("exec_suppressed_signal_share")
+                .cast(pl.Float64, strict=False)
+                .mean()
+                .alias("exec_suppressed_signal_share_mean"),
             )
             .sort("source_type")
         )
@@ -1323,6 +1529,14 @@ def run_backtest_grid_walkforward(
                 pl.col("ret_cv").cast(pl.Float64, strict=False).median().alias("ret_cv_median"),
                 pl.col("robustness_score_v2").cast(pl.Float64, strict=False).mean().alias("robustness_v2_mean"),
                 pl.col("is_zero_trade_combo").cast(pl.Float64, strict=False).mean().alias("zero_trade_combo_share"),
+                pl.col("exec_eligibility_rate")
+                .cast(pl.Float64, strict=False)
+                .mean()
+                .alias("exec_eligibility_rate_mean"),
+                pl.col("exec_suppressed_signal_share")
+                .cast(pl.Float64, strict=False)
+                .mean()
+                .alias("exec_suppressed_signal_share_mean"),
             )
             .with_columns(pl.lit("hold_bars").alias("dimension"))
             .sort(["source_type", "hold_bars"])
@@ -1493,6 +1707,14 @@ def run_backtest_grid_walkforward(
                     .cast(pl.Float64, strict=False)
                     .mean()
                     .alias("robustness_v2_mean"),
+                    pl.col("exec_eligibility_rate")
+                    .cast(pl.Float64, strict=False)
+                    .mean()
+                    .alias("exec_eligibility_rate_mean"),
+                    pl.col("exec_suppressed_signal_share")
+                    .cast(pl.Float64, strict=False)
+                    .mean()
+                    .alias("exec_suppressed_signal_share_mean"),
                     pl.col("overlay_vetoed_signal_share")
                     .cast(pl.Float64, strict=False)
                     .mean()
@@ -1532,6 +1754,13 @@ def run_backtest_grid_walkforward(
         "policy_filter_mode": policy_filter_mode,
         "overlay_enabled": bool(overlay_cluster_file is not None and overlay_cluster_hardening_dir is not None),
         "overlay_mode": overlay_mode,
+        "execution_profile": execution_profile,
+        "exec_overrides": {
+            "exec_min_price": exec_min_price,
+            "exec_min_dollar_vol20": exec_min_dollar_vol20,
+            "exec_max_vol_pct": exec_max_vol_pct,
+            "exec_min_history_bars": exec_min_history_bars,
+        },
         "selected_train_ends": selected_train_ends,
         "splits_total": splits_total,
         "splits_successful": splits_successful,

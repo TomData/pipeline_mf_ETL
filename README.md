@@ -605,3 +605,107 @@ Decision heuristics (explicit):
   - `KEEP_AS_BENCH`
   - `NICHE_FILTER`
   - `RESEARCH_ONLY`
+
+## Execution Realism Pass v1
+
+Execution Realism Pass v1 adds optional pre-signal execution eligibility filters without changing state engines or core signal semantics.
+
+- realism controls:
+  - `min_price` floor
+  - `min_dollar_vol_20` floor using rolling `close * volume` (`median`, window=20)
+  - `max_vol_pct` cap (uses `atr_pct_14` when present; fallback `(high-low)/close`)
+  - `min_history_bars_for_execution` warmup
+  - `vol_input_unit_mode` (`auto|decimal|percent_points`): in `auto`, volatility is normalized to decimal units if source appears to be percent-points (heuristic: median>1 or p90>1).
+- named profiles:
+  - `none` (disabled)
+  - `lite`
+  - `strict`
+- CLI flags on `backtest-run`, `backtest-wf-run`, `backtest-grid-run`, `backtest-grid-wf-run`:
+  - `--exec-profile {none,lite,strict}`
+  - `--exec-min-price`
+  - `--exec-min-dollar-vol20`
+  - `--exec-max-vol-pct`
+  - `--exec-min-history-bars`
+  - report thresholds:
+    - `--report-min-trades`
+    - `--report-max-zero-trade-share`
+    - `--report-max-ret-cv`
+
+Execution realism artifacts (when enabled/profile not `none`):
+
+- `execution_filter_summary.json`
+- `execution_filter_by_reason.csv`
+- `execution_filter_by_year.csv`
+- `execution_trade_context_summary.json`
+
+Suppression metrics semantics:
+
+- `*_count` fields are integer counts.
+- `*_share` fields are true shares in `[0,1]`, normalized by `suppressed_signal_count`.
+- when `suppressed_signal_count == 0`, suppression shares are written as `0.0` (not null).
+
+Execution metrics are propagated into:
+
+- backtest summaries
+- grid combo tables
+- walk-forward split/source summaries
+- grid-compare deltas and realism verdicts
+
+`execution-realism-report` command:
+
+- `python -m mf_etl.cli execution-realism-report`
+- writes:
+  - `artifacts/execution_realism_reports/<run_id>_execution_realism_v1/execution_realism_summary.json`
+  - `artifacts/execution_realism_reports/<run_id>_execution_realism_v1/execution_realism_table.csv`
+  - `artifacts/execution_realism_reports/<run_id>_execution_realism_v1/execution_realism_wf_table.csv`
+  - `artifacts/execution_realism_reports/<run_id>_execution_realism_v1/execution_realism_report.md`
+
+MVP simplification:
+
+- If multiple realism rules suppress a row, one primary suppression reason is assigned by fixed precedence for reporting.
+- Candidate ranking guard: runs with `trade_count == 0` or `zero_trade_share >= 1.0` are labeled `NOT_TRADABLE` and cannot be selected as primary/secondary candidates in `execution-realism-report`.
+
+## Execution Realism Calibration Pass v1
+
+Execution Realism Calibration Pass v1 adds a diagnostics/sweep layer to calibrate realism thresholds to the current universe before running full PnL backtests.
+
+- main command:
+  - `python -m mf_etl.cli execution-realism-calibrate --source-file /abs/path/decoded_rows.parquet --source-type hmm --overlay-mode none --by-year`
+- report re-render:
+  - `python -m mf_etl.cli execution-realism-calibration-report --calibration-dir /abs/path/artifacts/execution_realism_calibration/exec-calib-...`
+
+What calibration produces:
+
+- candidate/eligible/suppressed distributions for:
+  - `close`
+  - `dollar_vol_20`
+  - volatility metric used by realism
+  - history bars
+- suppression decomposition:
+  - waterfall JSON
+  - overlap matrix CSV
+  - first-fail CSV
+- threshold sweep (fast diagnostics only, no PnL simulation):
+  - `min_price`
+  - `min_dollar_vol20`
+  - `max_vol_pct`
+  - `min_history_bars`
+- auto recommendations for `lite` and `strict` target eligibility bands.
+
+Calibration artifacts:
+
+- `execution_calibration_summary.json`
+- `execution_calibration_distribution.csv`
+- `execution_calibration_distribution_by_year.csv` (when enabled)
+- `execution_calibration_waterfall.json`
+- `execution_calibration_reason_overlap.csv`
+- `execution_calibration_first_fail.csv`
+- `execution_calibration_units.json`
+- `execution_calibration_grid.csv`
+- `execution_calibration_grid_summary.json`
+- `execution_calibration_recommendations.json`
+- `execution_calibration_report.md`
+
+Interpretation note:
+
+- `ZERO_ELIGIBILITY` means threshold mismatch for the current universe/profile, not necessarily strategy failure. Grid summaries expose this with `realism_profile_broken_for_universe`.

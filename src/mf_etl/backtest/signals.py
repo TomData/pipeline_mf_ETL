@@ -36,6 +36,11 @@ def generate_signals(
                 pl.lit(False).alias("overlay_vetoed_signal"),
                 pl.lit(True).alias("overlay_gate_pass"),
                 pl.lit(False).alias("overlay_direction_conflict"),
+                pl.lit(True).alias("execution_gate_pass"),
+                pl.lit(False).alias("execution_candidate_before"),
+                pl.lit(False).alias("execution_candidate_after"),
+                pl.lit(False).alias("execution_suppressed_signal"),
+                pl.lit("none").alias("execution_filter_reason"),
             ]
         )
         return SignalResult(
@@ -54,6 +59,14 @@ def generate_signals(
                 "overlay_vetoed_by_policy_class": {},
                 "overlay_direction_conflict_count": 0,
                 "overlay_direction_conflict_share": None,
+                "execution_filters_enabled": False,
+                "candidate_signals_before_execution": 0,
+                "candidate_signals_after_execution": 0,
+                "execution_suppressed_signal_count": 0,
+                "execution_suppressed_signal_share": 0.0,
+                "execution_suppressed_by_reason": {},
+                "execution_suppressed_by_reason_count": {},
+                "execution_suppressed_by_reason_share": {},
             },
         )
 
@@ -74,6 +87,20 @@ def generate_signals(
     overlay_vetoed = 0
     overlay_vetoed_by_policy_class: dict[str, int] = {}
     direction_conflicts = 0
+    candidate_before_execution = 0
+    candidate_after_execution = 0
+    execution_suppressed = 0
+    execution_suppressed_by_reason: dict[str, int] = {}
+    execution_filters_enabled = bool(
+        "execution_filters_enabled" in sorted_df.columns
+        and int(
+            sorted_df.select(
+                pl.col("execution_filters_enabled").cast(pl.Int8, strict=False).sum()
+            ).item()
+            or 0
+        )
+        > 0
+    )
 
     for ticker, sub in sorted_df.group_by("ticker", maintain_order=True):
         ticker_str = str(ticker[0] if isinstance(ticker, tuple) else ticker)
@@ -87,7 +114,8 @@ def generate_signals(
             side = _entry_side(direction)
             primary_eligible = bool(row.get("signal_eligible")) and side is not None
             overlay_pass = bool(row.get("overlay_allow_signal", True))
-            eligible = bool(primary_eligible and overlay_pass)
+            execution_pass = bool(row.get("execution_eligible", True))
+            eligible = bool(primary_eligible and overlay_pass and execution_pass)
             state_id = row.get("state_id")
             changed = prev_state is not None and state_id != prev_state
 
@@ -104,6 +132,18 @@ def generate_signals(
                     )
                 else:
                     candidate_after += 1
+
+                execution_candidate_before_row = bool(primary_eligible and overlay_pass)
+                if execution_candidate_before_row:
+                    candidate_before_execution += 1
+                    if not execution_pass:
+                        execution_suppressed += 1
+                        reason = str(row.get("execution_filter_reason") or "none")
+                        execution_suppressed_by_reason[reason] = (
+                            int(execution_suppressed_by_reason.get(reason, 0)) + 1
+                        )
+                    else:
+                        candidate_after_execution += 1
 
                 overlay_direction = str(row.get("overlay_direction_hint") or "UNCONFIRMED")
                 if direction in {"LONG_BIAS", "SHORT_BIAS"} and overlay_direction in {"LONG_BIAS", "SHORT_BIAS"}:
@@ -141,6 +181,11 @@ def generate_signals(
                 and str(row.get("overlay_direction_hint") or "UNCONFIRMED") in {"LONG_BIAS", "SHORT_BIAS"}
                 and direction != str(row.get("overlay_direction_hint") or "UNCONFIRMED")
             )
+            out_row["execution_gate_pass"] = bool(execution_pass)
+            out_row["execution_candidate_before"] = bool(primary_eligible and overlay_pass)
+            out_row["execution_candidate_after"] = bool(primary_eligible and overlay_pass and execution_pass)
+            out_row["execution_suppressed_signal"] = bool(primary_eligible and overlay_pass and (not execution_pass))
+            out_row["execution_filter_reason"] = str(row.get("execution_filter_reason") or "none")
             rows_out.append(out_row)
 
             prev_state = state_id
@@ -166,5 +211,32 @@ def generate_signals(
         "overlay_direction_conflict_share": (
             float(direction_conflicts / candidate_before) if candidate_before > 0 else None
         ),
+        "execution_filters_enabled": execution_filters_enabled,
+        "candidate_signals_before_execution": int(candidate_before_execution),
+        "candidate_signals_after_execution": int(candidate_after_execution),
+        "execution_suppressed_signal_count": int(execution_suppressed),
+        "execution_suppressed_signal_share": (
+            float(execution_suppressed / candidate_before_execution)
+            if candidate_before_execution > 0
+            else 0.0
+        ),
+        # Keep this key as share map for compatibility with earlier callers.
+        "execution_suppressed_by_reason": {
+            reason: (
+                float(count / execution_suppressed)
+                if execution_suppressed > 0
+                else 0.0
+            )
+            for reason, count in execution_suppressed_by_reason.items()
+        },
+        "execution_suppressed_by_reason_count": execution_suppressed_by_reason,
+        "execution_suppressed_by_reason_share": {
+            reason: (
+                float(count / execution_suppressed)
+                if execution_suppressed > 0
+                else 0.0
+            )
+            for reason, count in execution_suppressed_by_reason.items()
+        },
     }
     return SignalResult(frame=out_df, diagnostics=diagnostics)

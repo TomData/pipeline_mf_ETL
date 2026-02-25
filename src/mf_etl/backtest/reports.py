@@ -14,6 +14,7 @@ def render_backtest_report(
     summary_by_symbol: pl.DataFrame,
     policy_summary: dict[str, Any] | None,
     overlay_summary: dict[str, Any] | None,
+    execution_summary: dict[str, Any] | None,
 ) -> str:
     """Render a single-run backtest markdown report."""
 
@@ -72,6 +73,57 @@ def render_backtest_report(
         )
         lines.append("")
 
+    if execution_summary is not None and bool(
+        execution_summary.get("filters_enabled_or_profile_non_none")
+    ):
+        lines.append("## Execution Realism")
+        lines.append(f"- execution_profile: {execution_summary.get('execution_profile')}")
+        lines.append(f"- execution_filters_enabled: {execution_summary.get('execution_filters_enabled')}")
+        lines.append(f"- vol_metric_source: {execution_summary.get('vol_metric_source')}")
+        lines.append(f"- vol_unit_detected: {execution_summary.get('vol_unit_detected')}")
+        lines.append(f"- vol_threshold_input: {execution_summary.get('vol_threshold_input')}")
+        lines.append(
+            f"- vol_threshold_effective_decimal: {execution_summary.get('vol_threshold_effective_decimal')}"
+        )
+        lines.append(
+            f"- vol_threshold_effective_pct: {execution_summary.get('vol_threshold_effective_pct')}"
+        )
+        lines.append(f"- realism_profile_status: {execution_summary.get('realism_profile_status')}")
+        lines.append(f"- exec_eligibility_rate: {execution_summary.get('exec_eligibility_rate')}")
+        lines.append(
+            f"- exec_suppressed_signal_share: {execution_summary.get('exec_suppressed_signal_share')}"
+        )
+        lines.append(
+            f"- exec_suppressed_by_price_count: {execution_summary.get('exec_suppressed_by_price_count')}"
+        )
+        lines.append(
+            f"- exec_suppressed_by_liquidity_count: {execution_summary.get('exec_suppressed_by_liquidity_count')}"
+        )
+        lines.append(
+            f"- exec_suppressed_by_vol_count: {execution_summary.get('exec_suppressed_by_vol_count')}"
+        )
+        lines.append(
+            f"- exec_suppressed_by_warmup_count: {execution_summary.get('exec_suppressed_by_warmup_count')}"
+        )
+        lines.append(
+            f"- exec_suppressed_by_price_share: {execution_summary.get('exec_suppressed_by_price_share')}"
+        )
+        lines.append(
+            f"- exec_suppressed_by_liquidity_share: {execution_summary.get('exec_suppressed_by_liquidity_share')}"
+        )
+        lines.append(f"- exec_suppressed_by_vol_share: {execution_summary.get('exec_suppressed_by_vol_share')}")
+        lines.append(
+            f"- exec_suppressed_by_warmup_share: {execution_summary.get('exec_suppressed_by_warmup_share')}"
+        )
+        lines.append(
+            f"- exec_trade_avg_dollar_vol_20: {execution_summary.get('exec_trade_avg_dollar_vol_20')}"
+        )
+        lines.append(
+            f"- exec_trade_p10_dollar_vol_20: {execution_summary.get('exec_trade_p10_dollar_vol_20')}"
+        )
+        lines.append(f"- exec_trade_avg_vol_pct: {execution_summary.get('exec_trade_avg_vol_pct')}")
+        lines.append("")
+
     lines.append("## By-State (Top 20 by trade_count)")
     lines.append("| state_id | class | direction | trade_count | win_rate | avg_return | expectancy |")
     lines.append("|---:|---|---|---:|---:|---:|---:|")
@@ -112,13 +164,14 @@ def render_backtest_compare_report(*, summary: dict[str, Any], compare_table: pl
     lines.append("")
 
     lines.append("## Table")
-    lines.append("| run_id | input_type | trade_count | win_rate | avg_return | median_return | profit_factor | expectancy | max_drawdown | overlay_mode | overlay_match_rate | overlay_vetoed_signal_share |")
-    lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|")
+    lines.append("| run_id | input_type | trade_count | win_rate | avg_return | median_return | profit_factor | expectancy | max_drawdown | overlay_mode | overlay_match_rate | overlay_vetoed_signal_share | execution_profile | exec_eligibility_rate | exec_suppressed_signal_share |")
+    lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---|---:|---:|")
     for row in compare_table.to_dicts():
         lines.append(
             f"| {row.get('run_id')} | {row.get('input_type')} | {row.get('trade_count')} | {row.get('win_rate')} | "
             f"{row.get('avg_return')} | {row.get('median_return')} | {row.get('profit_factor')} | {row.get('expectancy')} | {row.get('max_drawdown')} | "
-            f"{row.get('overlay_mode')} | {row.get('overlay_match_rate')} | {row.get('overlay_vetoed_signal_share')} |"
+            f"{row.get('overlay_mode')} | {row.get('overlay_match_rate')} | {row.get('overlay_vetoed_signal_share')} | "
+            f"{row.get('execution_profile')} | {row.get('exec_eligibility_rate')} | {row.get('exec_suppressed_signal_share')} |"
         )
     lines.append("")
     lines.append("## Notes")

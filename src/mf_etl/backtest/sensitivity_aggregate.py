@@ -239,6 +239,8 @@ def build_dimension_sensitivity(
         "state_subset_key",
         "overlay_mode",
         "overlay_enabled",
+        "execution_profile",
+        "execution_filters_enabled",
     ]
     work = metrics_table.with_columns(
         pl.col("is_zero_trade_combo").cast(pl.Int8, strict=False).fill_null(1).alias("is_zero_trade_combo_int")
@@ -276,6 +278,18 @@ def build_dimension_sensitivity(
                 .cast(pl.Float64, strict=False)
                 .mean()
                 .alias("overlay_vetoed_signal_share_mean"),
+                pl.col("exec_eligibility_rate")
+                .cast(pl.Float64, strict=False)
+                .mean()
+                .alias("exec_eligibility_rate_mean"),
+                pl.col("exec_suppressed_signal_share")
+                .cast(pl.Float64, strict=False)
+                .mean()
+                .alias("exec_suppressed_signal_share_mean"),
+                pl.col("exec_trade_avg_dollar_vol_20")
+                .cast(pl.Float64, strict=False)
+                .mean()
+                .alias("exec_trade_avg_dollar_vol_20_mean"),
             )
             .with_columns(
                 pl.lit(dim).alias("dimension"),
@@ -335,6 +349,8 @@ def build_cost_fragility(metrics_table: pl.DataFrame) -> pl.DataFrame:
         "state_subset_key",
         "overlay_mode",
         "overlay_enabled",
+        "execution_profile",
+        "execution_filters_enabled",
     ]
 
     grouped = (
@@ -477,6 +493,10 @@ def build_source_summary(metrics_table: pl.DataFrame, manifest: pl.DataFrame) ->
             pl.col("nan_warning_total").cast(pl.Float64, strict=False).sum().alias("nan_warning_total_sum"),
             pl.col("null_metric_count").cast(pl.Float64, strict=False).mean().alias("null_metric_cells_mean"),
             pl.col("overlay_enabled").cast(pl.Float64, strict=False).mean().alias("overlay_enabled_share"),
+            pl.col("execution_filters_enabled")
+            .cast(pl.Float64, strict=False)
+            .mean()
+            .alias("execution_filters_enabled_share"),
             pl.col("overlay_match_rate").cast(pl.Float64, strict=False).mean().alias("overlay_match_rate_mean"),
             pl.col("overlay_unknown_rate").cast(pl.Float64, strict=False).mean().alias("overlay_unknown_rate_mean"),
             pl.col("overlay_vetoed_signal_share")
@@ -487,6 +507,18 @@ def build_source_summary(metrics_table: pl.DataFrame, manifest: pl.DataFrame) ->
             .cast(pl.Float64, strict=False)
             .mean()
             .alias("overlay_direction_conflict_share_mean"),
+            pl.col("exec_eligibility_rate")
+            .cast(pl.Float64, strict=False)
+            .mean()
+            .alias("exec_eligibility_rate_mean"),
+            pl.col("exec_suppressed_signal_share")
+            .cast(pl.Float64, strict=False)
+            .mean()
+            .alias("exec_suppressed_signal_share_mean"),
+            pl.col("exec_trade_avg_dollar_vol_20")
+            .cast(pl.Float64, strict=False)
+            .mean()
+            .alias("exec_trade_avg_dollar_vol_20_mean"),
         )
         .sort("source_type")
     )

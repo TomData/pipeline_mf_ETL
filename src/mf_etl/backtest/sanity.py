@@ -96,6 +96,90 @@ def summarize_backtest_run(run_dir: Path) -> dict[str, Any]:
             "overlay_direction_conflict_share": overlay.get("overlay_direction_conflict_share"),
         }
 
+    execution_info: dict[str, Any] | None = None
+    execution = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
+    if execution and bool(execution.get("filters_enabled_or_profile_non_none")):
+        required_execution = [
+            run_dir / "execution_filter_summary.json",
+            run_dir / "execution_filter_by_reason.csv",
+            run_dir / "execution_filter_by_year.csv",
+            run_dir / "execution_trade_context_summary.json",
+        ]
+        for path in required_execution:
+            if not path.exists():
+                errors.append(f"missing_execution_artifact:{path.name}")
+        exec_elig = execution.get("exec_eligibility_rate")
+        exec_elig_val = float(exec_elig) if exec_elig is not None else None
+        if exec_elig_val is not None and not (0.0 <= exec_elig_val <= 1.0):
+            errors.append("exec_eligibility_rate_out_of_range")
+        exec_supp = execution.get("exec_suppressed_signal_share")
+        exec_supp_val = float(exec_supp) if exec_supp is not None else None
+        if exec_supp_val is not None and not (0.0 <= exec_supp_val <= 1.0):
+            errors.append("exec_suppressed_signal_share_out_of_range")
+        for field in [
+            "exec_suppressed_by_price_share",
+            "exec_suppressed_by_liquidity_share",
+            "exec_suppressed_by_vol_share",
+            "exec_suppressed_by_warmup_share",
+        ]:
+            value = execution.get(field)
+            value_f = float(value) if value is not None else None
+            if value_f is not None and not (0.0 <= value_f <= 1.0):
+                errors.append(f"{field}_out_of_range")
+        for field in [
+            "exec_suppressed_by_price_count",
+            "exec_suppressed_by_liquidity_count",
+            "exec_suppressed_by_vol_count",
+            "exec_suppressed_by_warmup_count",
+        ]:
+            value = execution.get(field)
+            if value is None:
+                continue
+            value_f = float(value)
+            if value_f < 0 or abs(value_f - round(value_f)) > 1e-9:
+                errors.append(f"{field}_invalid")
+        before_cnt = int(execution.get("candidate_signals_before_filters", 0) or 0)
+        after_cnt = int(execution.get("candidate_signals_after_filters", 0) or 0)
+        suppressed = int(execution.get("exec_suppressed_signal_count", 0) or 0)
+        if after_cnt > before_cnt:
+            errors.append("execution_candidate_count_invalid_order")
+        if suppressed != (before_cnt - after_cnt):
+            errors.append("execution_suppressed_count_mismatch")
+        by_reason_path = run_dir / "execution_filter_by_reason.csv"
+        if by_reason_path.exists():
+            by_reason = pl.read_csv(by_reason_path)
+            if "suppressed_signal_count" in by_reason.columns:
+                reason_sum = int(
+                    by_reason.select(pl.col("suppressed_signal_count").cast(pl.Int64, strict=False).sum()).item()
+                    or 0
+                )
+                if reason_sum > suppressed:
+                    errors.append("execution_reason_count_sum_above_suppressed")
+            for field in ["suppressed_signal_share", "row_share_total"]:
+                if field in by_reason.columns:
+                    bad_share = int(
+                        by_reason.filter(
+                            (~pl.col(field).cast(pl.Float64, strict=False).is_finite())
+                            | (pl.col(field).cast(pl.Float64, strict=False) < 0)
+                            | (pl.col(field).cast(pl.Float64, strict=False) > 1)
+                        ).height
+                    )
+                    if bad_share > 0:
+                        errors.append(f"execution_by_reason_{field}_invalid")
+        execution_info = {
+            "execution_profile": execution.get("execution_profile"),
+            "realism_profile_status": execution.get("realism_profile_status"),
+            "exec_eligibility_rate": execution.get("exec_eligibility_rate"),
+            "exec_suppressed_signal_share": execution.get("exec_suppressed_signal_share"),
+            "exec_trade_avg_dollar_vol_20": execution.get("exec_trade_avg_dollar_vol_20"),
+        }
+
+    verdict_label = summary.get("verdict_label")
+    if verdict_label in {"PRIMARY_CANDIDATE", "SECONDARY_CANDIDATE"}:
+        trade_count = int(headline.get("trade_count", 0) or 0)
+        if trade_count <= 0:
+            errors.append("candidate_verdict_with_zero_trades")
+
     return {
         "run_dir": str(run_dir),
         "summary": summary,
@@ -105,4 +189,5 @@ def summarize_backtest_run(run_dir: Path) -> dict[str, Any]:
         "errors": errors,
         "policy_info": policy_info,
         "overlay_info": overlay_info,
+        "execution_info": execution_info,
     }

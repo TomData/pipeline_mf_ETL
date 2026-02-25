@@ -14,6 +14,11 @@ import numpy as np
 import polars as pl
 
 from mf_etl.backtest.adapters import normalize_backtest_input
+from mf_etl.backtest.execution_realism import (
+    apply_execution_realism_filter,
+    build_execution_trade_context_summary,
+    resolve_execution_realism_params,
+)
 from mf_etl.backtest.engine import simulate_trades
 from mf_etl.backtest.metrics import (
     build_exit_reason_summary,
@@ -30,6 +35,7 @@ from mf_etl.backtest.models import (
     ExitMode,
     InputType,
     OverlayMode,
+    ExecutionProfileName,
     PolicyFilterMode,
     SignalMode,
 )
@@ -174,6 +180,14 @@ def run_backtest_run(
     overlay_cluster_hardening_dir: Path | None,
     overlay_mode: OverlayMode,
     overlay_join_keys: list[str] | None,
+    execution_profile: ExecutionProfileName,
+    exec_min_price: float | None,
+    exec_min_dollar_vol20: float | None,
+    exec_max_vol_pct: float | None,
+    exec_min_history_bars: int | None,
+    report_min_trades: int | None,
+    report_max_zero_trade_share: float | None,
+    report_max_ret_cv: float | None,
     fee_bps_per_side: float,
     slippage_bps_per_side: float,
     equity_mode: EquityMode,
@@ -204,6 +218,14 @@ def run_backtest_run(
         overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
         overlay_mode=overlay_mode,
         overlay_join_keys=(overlay_join_keys or list(settings.backtest_policy_overlay.join_keys)),
+        execution_profile=execution_profile,
+        exec_min_price=exec_min_price,
+        exec_min_dollar_vol20=exec_min_dollar_vol20,
+        exec_max_vol_pct=exec_max_vol_pct,
+        exec_min_history_bars=exec_min_history_bars,
+        report_min_trades=report_min_trades,
+        report_max_zero_trade_share=report_max_zero_trade_share,
+        report_max_ret_cv=report_max_ret_cv,
         fee_bps_per_side=fee_bps_per_side,
         slippage_bps_per_side=slippage_bps_per_side,
         equity_mode=equity_mode,
@@ -275,6 +297,27 @@ def run_backtest_run(
         overlay_duplicate_keys = overlay_result.duplicate_keys
         overlay_policy_mix = overlay_result.policy_mix_on_primary
 
+    execution_params = resolve_execution_realism_params(
+        settings,
+        exec_profile=execution_profile,
+        exec_min_price=exec_min_price,
+        exec_min_dollar_vol20=exec_min_dollar_vol20,
+        exec_max_vol_pct=exec_max_vol_pct,
+        exec_min_history_bars=exec_min_history_bars,
+        report_min_trades=report_min_trades,
+        report_max_zero_trade_share=report_max_zero_trade_share,
+        report_max_ret_cv=report_max_ret_cv,
+    )
+    execution_result = apply_execution_realism_filter(
+        mapped,
+        params=execution_params,
+        logger=effective_logger,
+    )
+    mapped = execution_result.frame
+    execution_artifacts_enabled = bool(
+        execution_result.filters_enabled or execution_params.profile_name != "none"
+    )
+
     signal_result = generate_signals(
         mapped,
         signal_mode=signal_mode,
@@ -336,6 +379,10 @@ def run_backtest_run(
     overlay_policy_mix_path = output_dir / "overlay_policy_mix_on_primary.csv"
     overlay_signal_effect_path = output_dir / "overlay_signal_effect_summary.json"
     overlay_perf_path = output_dir / "overlay_performance_breakdown.csv"
+    execution_filter_summary_path = output_dir / "execution_filter_summary.json"
+    execution_filter_by_reason_path = output_dir / "execution_filter_by_reason.csv"
+    execution_filter_by_year_path = output_dir / "execution_filter_by_year.csv"
+    execution_trade_context_summary_path = output_dir / "execution_trade_context_summary.json"
     report_path = output_dir / "backtest_report.md"
 
     write_json_atomically(_finite_json(asdict(config)), config_path)
@@ -385,6 +432,47 @@ def run_backtest_run(
             else []
         ),
     }
+    execution_trade_context_summary = build_execution_trade_context_summary(
+        trades=engine_result.trades,
+        signal_frame=signal_result.frame,
+    )
+    exec_eligibility_rate = _safe_float(execution_result.summary.get("eligibility_rate"))
+    realism_profile_status = (
+        "ZERO_ELIGIBILITY"
+        if (execution_params.profile_name != "none" and (exec_eligibility_rate == 0.0))
+        else ("OK" if execution_params.profile_name != "none" else "NOT_APPLIED")
+    )
+    if realism_profile_status == "ZERO_ELIGIBILITY":
+        effective_logger.warning(
+            "backtest.execution_realism.zero_eligibility profile=%s run_id=%s rows_total=%s",
+            execution_params.profile_name,
+            run_id,
+            execution_result.summary.get("rows_total"),
+        )
+    execution_signal_effect = {
+        "execution_profile": execution_params.profile_name,
+        "execution_filters_enabled": bool(execution_result.filters_enabled),
+        "candidate_signals_before_filters": int(
+            signal_result.diagnostics.get("candidate_signals_before_execution", 0) or 0
+        ),
+        "candidate_signals_after_filters": int(
+            signal_result.diagnostics.get("candidate_signals_after_execution", 0) or 0
+        ),
+        "suppressed_signal_count": int(
+            signal_result.diagnostics.get("execution_suppressed_signal_count", 0) or 0
+        ),
+        "suppressed_signal_share": _safe_float(
+            signal_result.diagnostics.get("execution_suppressed_signal_share")
+        ),
+        "suppressed_by_reason_count": signal_result.diagnostics.get(
+            "execution_suppressed_by_reason_count",
+            {},
+        ),
+        "suppressed_by_reason_share": signal_result.diagnostics.get(
+            "execution_suppressed_by_reason_share",
+            {},
+        ),
+    }
 
     if export_joined_rows:
         write_parquet_atomically(signal_result.frame, output_dir / "normalized_rows_with_policy.parquet")
@@ -405,6 +493,14 @@ def run_backtest_run(
         write_csv_atomically(overlay_policy_mix, overlay_policy_mix_path)
         write_json_atomically(_finite_json(overlay_signal_effect), overlay_signal_effect_path)
         write_csv_atomically(build_overlay_performance_breakdown(engine_result.trades), overlay_perf_path)
+    if execution_artifacts_enabled:
+        write_json_atomically(_finite_json(execution_result.summary), execution_filter_summary_path)
+        write_csv_atomically(execution_result.by_reason, execution_filter_by_reason_path)
+        write_csv_atomically(execution_result.by_year, execution_filter_by_year_path)
+        write_json_atomically(
+            _finite_json(execution_trade_context_summary),
+            execution_trade_context_summary_path,
+        )
 
     finished = datetime.now(timezone.utc)
     summary_payload = {
@@ -457,6 +553,102 @@ def run_backtest_run(
             ),
             "overlay_join_summary": overlay_join_summary,
         },
+        "execution": {
+            "execution_profile": execution_params.profile_name,
+            "execution_filters_enabled": bool(execution_result.filters_enabled),
+            "params_used": execution_result.summary.get("params_used", {}),
+            "vol_metric_source": execution_result.summary.get("vol_metric_source"),
+            "vol_unit_detected": execution_result.summary.get("vol_unit_detected"),
+            "vol_threshold_input": _safe_float(execution_result.summary.get("vol_threshold_input")),
+            "vol_threshold_effective_decimal": _safe_float(
+                execution_result.summary.get("vol_threshold_effective_decimal")
+            ),
+            "vol_threshold_effective_pct": _safe_float(
+                execution_result.summary.get("vol_threshold_effective_pct")
+            ),
+            "vol_threshold_input_interpretation": execution_result.summary.get(
+                "vol_threshold_input_interpretation"
+            ),
+            "vol_unit_warnings": execution_result.summary.get("vol_unit_warnings", []),
+            "rows_total": int(execution_result.summary.get("rows_total", 0) or 0),
+            "rows_eligible": int(execution_result.summary.get("rows_eligible", 0) or 0),
+            "rows_ineligible": int(execution_result.summary.get("rows_ineligible", 0) or 0),
+            "exec_eligibility_rate": exec_eligibility_rate,
+            "candidate_signals_before_filters": int(
+                signal_result.diagnostics.get("candidate_signals_before_execution", 0) or 0
+            ),
+            "candidate_signals_after_filters": int(
+                signal_result.diagnostics.get("candidate_signals_after_execution", 0) or 0
+            ),
+            "exec_suppressed_signal_count": int(
+                signal_result.diagnostics.get("execution_suppressed_signal_count", 0) or 0
+            ),
+            "exec_suppressed_signal_share": _safe_float(
+                signal_result.diagnostics.get("execution_suppressed_signal_share")
+            ),
+            "exec_suppressed_by_price_count": int(
+                (signal_result.diagnostics.get("execution_suppressed_by_reason_count", {}) or {}).get(
+                    "price_floor",
+                    0,
+                )
+                or 0
+            ),
+            "exec_suppressed_by_liquidity_count": int(
+                (signal_result.diagnostics.get("execution_suppressed_by_reason_count", {}) or {}).get(
+                    "liquidity_floor",
+                    0,
+                )
+                or 0
+            ),
+            "exec_suppressed_by_vol_count": int(
+                (signal_result.diagnostics.get("execution_suppressed_by_reason_count", {}) or {}).get(
+                    "vol_cap",
+                    0,
+                )
+                or 0
+            ),
+            "exec_suppressed_by_warmup_count": int(
+                (signal_result.diagnostics.get("execution_suppressed_by_reason_count", {}) or {}).get(
+                    "warmup",
+                    0,
+                )
+                or 0
+            ),
+            "exec_suppressed_by_price_share": _safe_float(
+                (signal_result.diagnostics.get("execution_suppressed_by_reason_share", {}) or {}).get(
+                    "price_floor"
+                )
+            )
+            or 0.0,
+            "exec_suppressed_by_liquidity_share": _safe_float(
+                (signal_result.diagnostics.get("execution_suppressed_by_reason_share", {}) or {}).get(
+                    "liquidity_floor"
+                )
+            )
+            or 0.0,
+            "exec_suppressed_by_vol_share": _safe_float(
+                (signal_result.diagnostics.get("execution_suppressed_by_reason_share", {}) or {}).get("vol_cap")
+            )
+            or 0.0,
+            "exec_suppressed_by_warmup_share": _safe_float(
+                (signal_result.diagnostics.get("execution_suppressed_by_reason_share", {}) or {}).get("warmup")
+            )
+            or 0.0,
+            "exec_trade_avg_dollar_vol_20": _safe_float(
+                execution_trade_context_summary.get("avg_dollar_vol_20")
+            ),
+            "exec_trade_p10_dollar_vol_20": _safe_float(
+                execution_trade_context_summary.get("p10_dollar_vol_20")
+            ),
+            "exec_trade_avg_vol_pct": _safe_float(execution_trade_context_summary.get("avg_vol_pct")),
+            "report_thresholds": {
+                "min_trades_required": execution_params.report_min_trades,
+                "max_zero_trade_share_warn": execution_params.report_max_zero_trade_share,
+                "max_ret_cv_warn": execution_params.report_max_ret_cv,
+            },
+            "realism_profile_status": realism_profile_status,
+            "filters_enabled_or_profile_non_none": bool(execution_artifacts_enabled),
+        },
         "outputs": {
             "summary": str(summary_path),
             "trades_parquet": str(trades_parquet),
@@ -468,6 +660,18 @@ def run_backtest_run(
             "overlay_policy_mix_on_primary": str(overlay_policy_mix_path) if overlay_enabled else None,
             "overlay_signal_effect_summary": str(overlay_signal_effect_path) if overlay_enabled else None,
             "overlay_performance_breakdown": str(overlay_perf_path) if overlay_enabled else None,
+            "execution_filter_summary": (
+                str(execution_filter_summary_path) if execution_artifacts_enabled else None
+            ),
+            "execution_filter_by_reason": (
+                str(execution_filter_by_reason_path) if execution_artifacts_enabled else None
+            ),
+            "execution_filter_by_year": (
+                str(execution_filter_by_year_path) if execution_artifacts_enabled else None
+            ),
+            "execution_trade_context_summary": (
+                str(execution_trade_context_summary_path) if execution_artifacts_enabled else None
+            ),
         },
     }
     write_json_atomically(_finite_json(summary_payload), summary_path)
@@ -478,6 +682,9 @@ def run_backtest_run(
         summary_by_symbol=summary_by_symbol,
         policy_summary=(policy_snapshot.get("summary") if isinstance(policy_snapshot, dict) else None),
         overlay_summary=(summary_payload.get("overlay") if isinstance(summary_payload.get("overlay"), dict) else None),
+        execution_summary=(
+            summary_payload.get("execution") if isinstance(summary_payload.get("execution"), dict) else None
+        ),
     )
     write_markdown_atomically(report, report_path)
 
@@ -515,6 +722,7 @@ def run_backtest_compare(
         headline = payload.get("headline", {})
         equity = payload.get("equity_metrics") or {}
         overlay = payload.get("overlay") or {}
+        execution = payload.get("execution") or {}
         rows.append(
             {
                 "run_id": payload.get("run_id"),
@@ -533,6 +741,10 @@ def run_backtest_compare(
                 "overlay_match_rate": overlay.get("overlay_match_rate"),
                 "overlay_vetoed_signal_share": overlay.get("overlay_vetoed_signal_share"),
                 "overlay_direction_conflict_share": overlay.get("overlay_direction_conflict_share"),
+                "execution_profile": execution.get("execution_profile"),
+                "exec_eligibility_rate": execution.get("exec_eligibility_rate"),
+                "exec_suppressed_signal_share": execution.get("exec_suppressed_signal_share"),
+                "exec_trade_avg_dollar_vol_20": execution.get("exec_trade_avg_dollar_vol_20"),
             }
         )
 
@@ -580,7 +792,11 @@ def _safe_model_aggregate(df: pl.DataFrame, model: str) -> dict[str, Any]:
             "avg_return_mean": None,
             "expectancy_mean": None,
             "profit_factor_mean": None,
+            "exec_eligibility_rate_mean": None,
+            "exec_suppressed_signal_share_mean": None,
+            "exec_trade_avg_dollar_vol_20_mean": None,
         }
+    has_exec = "exec_eligibility_rate" in sub.columns
     return {
         "model": model,
         "splits": int(sub.height),
@@ -589,6 +805,31 @@ def _safe_model_aggregate(df: pl.DataFrame, model: str) -> dict[str, Any]:
         "avg_return_mean": _safe_float(sub.select(pl.col("avg_return").cast(pl.Float64, strict=False).mean()).item()),
         "expectancy_mean": _safe_float(sub.select(pl.col("expectancy").cast(pl.Float64, strict=False).mean()).item()),
         "profit_factor_mean": _safe_float(sub.select(pl.col("profit_factor").cast(pl.Float64, strict=False).mean()).item()),
+        "exec_eligibility_rate_mean": (
+            _safe_float(
+                sub.select(pl.col("exec_eligibility_rate").cast(pl.Float64, strict=False).mean()).item()
+            )
+            if has_exec
+            else None
+        ),
+        "exec_suppressed_signal_share_mean": (
+            _safe_float(
+                sub.select(
+                    pl.col("exec_suppressed_signal_share").cast(pl.Float64, strict=False).mean()
+                ).item()
+            )
+            if has_exec
+            else None
+        ),
+        "exec_trade_avg_dollar_vol_20_mean": (
+            _safe_float(
+                sub.select(
+                    pl.col("exec_trade_avg_dollar_vol_20").cast(pl.Float64, strict=False).mean()
+                ).item()
+            )
+            if has_exec
+            else None
+        ),
     }
 
 
@@ -601,6 +842,14 @@ def run_backtest_walkforward(
     overlay_cluster_hardening_dir: Path | None,
     overlay_mode: OverlayMode,
     overlay_join_keys: list[str] | None,
+    execution_profile: ExecutionProfileName,
+    exec_min_price: float | None,
+    exec_min_dollar_vol20: float | None,
+    exec_max_vol_pct: float | None,
+    exec_min_history_bars: int | None,
+    report_min_trades: int | None,
+    report_max_zero_trade_share: float | None,
+    report_max_ret_cv: float | None,
     signal_mode: SignalMode,
     exit_mode: ExitMode,
     hold_bars: int,
@@ -693,6 +942,14 @@ def run_backtest_walkforward(
                     overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
                     overlay_mode=overlay_mode,
                     overlay_join_keys=overlay_join_keys,
+                    execution_profile=execution_profile,
+                    exec_min_price=exec_min_price,
+                    exec_min_dollar_vol20=exec_min_dollar_vol20,
+                    exec_max_vol_pct=exec_max_vol_pct,
+                    exec_min_history_bars=exec_min_history_bars,
+                    report_min_trades=report_min_trades,
+                    report_max_zero_trade_share=report_max_zero_trade_share,
+                    report_max_ret_cv=report_max_ret_cv,
                     fee_bps_per_side=fee_bps_per_side,
                     slippage_bps_per_side=slippage_bps_per_side,
                     equity_mode=equity_mode,
@@ -706,6 +963,7 @@ def run_backtest_walkforward(
                 payload = _load_json(result.summary_path)
                 head = payload.get("headline", {})
                 overlay = payload.get("overlay", {}) if isinstance(payload.get("overlay"), dict) else {}
+                execution = payload.get("execution", {}) if isinstance(payload.get("execution"), dict) else {}
                 split_rows.append(
                     {
                         "train_end": train_end,
@@ -716,6 +974,10 @@ def run_backtest_walkforward(
                         "avg_return": head.get("avg_return"),
                         "profit_factor": head.get("profit_factor"),
                         "expectancy": head.get("expectancy"),
+                        "exec_eligibility_rate": execution.get("exec_eligibility_rate"),
+                        "exec_suppressed_signal_share": execution.get("exec_suppressed_signal_share"),
+                        "exec_trade_avg_dollar_vol_20": execution.get("exec_trade_avg_dollar_vol_20"),
+                        "execution_profile": execution.get("execution_profile"),
                         "status": "SUCCESS",
                         "error": None,
                     }
@@ -771,6 +1033,13 @@ def run_backtest_walkforward(
         "generated_ts": datetime.now(timezone.utc).isoformat(),
         "overlay_enabled": bool(overlay_cluster_file is not None and overlay_cluster_hardening_dir is not None),
         "overlay_mode": overlay_mode,
+        "execution_profile": execution_profile,
+        "exec_overrides": {
+            "exec_min_price": exec_min_price,
+            "exec_min_dollar_vol20": exec_min_dollar_vol20,
+            "exec_max_vol_pct": exec_max_vol_pct,
+            "exec_min_history_bars": exec_min_history_bars,
+        },
     }
 
     overlay_source_summary = (

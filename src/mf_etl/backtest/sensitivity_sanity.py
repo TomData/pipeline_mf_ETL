@@ -134,6 +134,161 @@ def summarize_grid_run(grid_run_dir: Path) -> dict[str, Any]:
                 if bad_veto > 0:
                     errors.append("overlay_veto_share_invalid")
 
+    if "execution_filters_enabled" in metrics.columns:
+        exec_enabled_count = int(metrics.filter(pl.col("execution_filters_enabled") == True).height)
+        if exec_enabled_count > 0:
+            required_exec_cols = [
+                "execution_profile",
+                "exec_eligibility_rate",
+                "exec_suppressed_signal_share",
+            ]
+            missing_exec_cols = [c for c in required_exec_cols if c not in metrics.columns]
+            if missing_exec_cols:
+                errors.append(f"missing_execution_metric_columns:{','.join(missing_exec_cols)}")
+            bad_exec_elig = int(
+                metrics.filter(
+                    pl.col("execution_filters_enabled")
+                    & (
+                        pl.col("exec_eligibility_rate").cast(pl.Float64, strict=False).is_null()
+                        | (~pl.col("exec_eligibility_rate").cast(pl.Float64, strict=False).is_finite())
+                        | (pl.col("exec_eligibility_rate") < 0)
+                        | (pl.col("exec_eligibility_rate") > 1)
+                    )
+                ).height
+            )
+            if bad_exec_elig > 0:
+                errors.append("exec_eligibility_rate_invalid")
+            bad_exec_supp = int(
+                metrics.filter(
+                    pl.col("execution_filters_enabled")
+                    & (
+                        pl.col("exec_suppressed_signal_share").cast(pl.Float64, strict=False).is_null()
+                        | (~pl.col("exec_suppressed_signal_share").cast(pl.Float64, strict=False).is_finite())
+                        | (pl.col("exec_suppressed_signal_share") < 0)
+                        | (pl.col("exec_suppressed_signal_share") > 1)
+                    )
+                ).height
+            )
+            if bad_exec_supp > 0:
+                errors.append("exec_suppressed_signal_share_invalid")
+            if all(
+                col in metrics.columns
+                for col in [
+                    "exec_candidate_signals_before_filters",
+                    "exec_candidate_signals_after_filters",
+                    "exec_suppressed_signal_count",
+                ]
+            ):
+                bad_order = int(
+                    metrics.filter(
+                        pl.col("execution_filters_enabled")
+                        & (
+                            pl.col("exec_candidate_signals_after_filters").cast(pl.Float64, strict=False)
+                            > pl.col("exec_candidate_signals_before_filters").cast(pl.Float64, strict=False)
+                        )
+                    ).height
+                )
+                if bad_order > 0:
+                    errors.append("execution_candidate_count_invalid_order")
+                bad_mismatch = int(
+                    metrics.filter(
+                        pl.col("execution_filters_enabled")
+                        & (
+                            pl.col("exec_suppressed_signal_count").cast(pl.Float64, strict=False)
+                            != (
+                                pl.col("exec_candidate_signals_before_filters").cast(pl.Float64, strict=False)
+                                - pl.col("exec_candidate_signals_after_filters").cast(pl.Float64, strict=False)
+                            )
+                        )
+                    ).height
+                )
+                if bad_mismatch > 0:
+                    errors.append("execution_suppressed_count_mismatch")
+            for share_col in [
+                "exec_suppressed_by_price_share",
+                "exec_suppressed_by_liquidity_share",
+                "exec_suppressed_by_vol_share",
+                "exec_suppressed_by_warmup_share",
+            ]:
+                if share_col not in metrics.columns:
+                    continue
+                bad_share = int(
+                    metrics.filter(
+                        pl.col("execution_filters_enabled")
+                        & (
+                            pl.col(share_col).cast(pl.Float64, strict=False).is_null()
+                            | (~pl.col(share_col).cast(pl.Float64, strict=False).is_finite())
+                            | (pl.col(share_col).cast(pl.Float64, strict=False) < 0)
+                            | (pl.col(share_col).cast(pl.Float64, strict=False) > 1)
+                        )
+                    ).height
+                )
+                if bad_share > 0:
+                    errors.append(f"{share_col}_invalid")
+            for count_col in [
+                "exec_suppressed_by_price_count",
+                "exec_suppressed_by_liquidity_count",
+                "exec_suppressed_by_vol_count",
+                "exec_suppressed_by_warmup_count",
+            ]:
+                if count_col not in metrics.columns:
+                    continue
+                bad_count = int(
+                    metrics.filter(
+                        pl.col("execution_filters_enabled")
+                        & (
+                            pl.col(count_col).cast(pl.Float64, strict=False).is_null()
+                            | (~pl.col(count_col).cast(pl.Float64, strict=False).is_finite())
+                            | (pl.col(count_col).cast(pl.Float64, strict=False) < 0)
+                            | (
+                                (
+                                    pl.col(count_col).cast(pl.Float64, strict=False)
+                                    - pl.col(count_col).cast(pl.Float64, strict=False).round(0)
+                                ).abs()
+                                > 1e-9
+                            )
+                        )
+                    ).height
+                )
+                if bad_count > 0:
+                    errors.append(f"{count_col}_invalid")
+            if all(
+                col in metrics.columns
+                for col in [
+                    "exec_suppressed_signal_count",
+                    "exec_suppressed_by_price_count",
+                    "exec_suppressed_by_liquidity_count",
+                    "exec_suppressed_by_vol_count",
+                    "exec_suppressed_by_warmup_count",
+                ]
+            ):
+                bad_reason_sum = int(
+                    metrics.filter(
+                        pl.col("execution_filters_enabled")
+                        & (
+                            (
+                                pl.col("exec_suppressed_by_price_count").cast(pl.Float64, strict=False)
+                                + pl.col("exec_suppressed_by_liquidity_count").cast(pl.Float64, strict=False)
+                                + pl.col("exec_suppressed_by_vol_count").cast(pl.Float64, strict=False)
+                                + pl.col("exec_suppressed_by_warmup_count").cast(pl.Float64, strict=False)
+                            )
+                            > pl.col("exec_suppressed_signal_count").cast(pl.Float64, strict=False)
+                        )
+                    ).height
+                )
+                if bad_reason_sum > 0:
+                    errors.append("execution_reason_count_sum_above_suppressed")
+
+    if "realism_aware_verdict" in metrics.columns and "trade_count" in metrics.columns:
+        bad_candidate = int(
+            metrics.filter(
+                pl.col("realism_aware_verdict").is_in(["PRIMARY_CANDIDATE", "SECONDARY_CANDIDATE"])
+                & (pl.col("trade_count").cast(pl.Int64, strict=False) <= 0)
+            ).height
+        )
+        if bad_candidate > 0:
+            errors.append("candidate_verdict_with_zero_trades")
+
     sources = sorted(set(manifest.get_column("source_type").to_list())) if "source_type" in manifest.columns else []
     if str(summary.get("scope", "")).startswith("multi-"):
         for src in sources:
@@ -223,6 +378,8 @@ def summarize_grid_run(grid_run_dir: Path) -> dict[str, Any]:
     zero_trade_combos = int(metrics.filter(pl.col("is_zero_trade_combo") == True).height) if "is_zero_trade_combo" in metrics.columns else 0
     if "zero_trade_combos" in summary and int(summary.get("zero_trade_combos", 0)) != zero_trade_combos:
         warnings.append("zero_trade_combo_count_mismatch")
+    if bool(summary.get("realism_profile_broken_for_universe", False)):
+        warnings.append("realism_profile_broken_for_universe")
 
     return {
         "grid_run_dir": str(grid_run_dir),

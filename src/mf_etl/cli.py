@@ -71,6 +71,7 @@ from mf_etl.backtest.pipeline import (
 from mf_etl.backtest.models import InputType
 from mf_etl.backtest.sanity import summarize_backtest_run
 from mf_etl.backtest.sensitivity_models import GridDimensionValues, SourceInputSpec
+from mf_etl.backtest.hybrid_eval_report import run_hybrid_eval_report
 from mf_etl.backtest.sensitivity_runner import (
     run_backtest_grid,
     run_backtest_grid_compare,
@@ -4387,6 +4388,138 @@ def backtest_grid_wf_run(
     typer.echo(f"overlay_split_summary_path: {result.output_dir / 'wf_overlay_split_summary.csv'}")
     typer.echo(f"overlay_source_summary_path: {result.output_dir / 'wf_overlay_source_summary.csv'}")
     typer.echo(f"overlay_effectiveness_summary_path: {result.output_dir / 'wf_overlay_effectiveness_summary.csv'}")
+    typer.echo(f"report_path: {result.report_path}")
+
+
+@app.command("hybrid-eval-report")
+def hybrid_eval_report(
+    hmm_baseline_grid_dir: Path = typer.Option(
+        Path("/home/tom/projects/mf_etl/artifacts/backtest_sensitivity/grid-8e70f7c58ff4_single-hmm_default"),
+        "--hmm-baseline-grid-dir",
+        help="HMM baseline grid run directory.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    hmm_allow_only_grid_dir: Path = typer.Option(
+        Path("/home/tom/projects/mf_etl/artifacts/backtest_sensitivity/grid-177aac2f15c8_single-hmm_default"),
+        "--hmm-allow-only-grid-dir",
+        help="HMM overlay allow_only grid run directory.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    hmm_block_veto_grid_dir: Path = typer.Option(
+        Path("/home/tom/projects/mf_etl/artifacts/backtest_sensitivity/grid-50e9f3fede69_single-hmm_default"),
+        "--hmm-block-veto-grid-dir",
+        help="HMM overlay block_veto grid run directory.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    flow_allow_only_grid_dir: Path | None = typer.Option(
+        Path("/home/tom/projects/mf_etl/artifacts/backtest_sensitivity/grid-36984dda7a77_single-flow_default"),
+        "--flow-allow-only-grid-dir",
+        help="Optional FLOW overlay allow_only grid run directory comparator.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    wf_hmm_baseline_dir: Path | None = typer.Option(
+        Path("/home/tom/projects/mf_etl/artifacts/backtest_sensitivity_walkforward/wfgrid-34967fd30e99"),
+        "--wf-hmm-baseline-dir",
+        help="Optional HMM baseline walk-forward grid run directory.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    wf_hmm_hybrid_dir: Path | None = typer.Option(
+        Path("/home/tom/projects/mf_etl/artifacts/backtest_sensitivity_walkforward/wfgrid-33285ab4fc2c"),
+        "--wf-hmm-hybrid-dir",
+        help="Optional HMM hybrid walk-forward grid run directory.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    compare_run_dir: Path | None = typer.Option(
+        Path("/home/tom/projects/mf_etl/artifacts/backtest_sensitivity/backtest-grid-compare-4d0688d80ee8"),
+        "--compare-run-dir",
+        help="Optional existing backtest-grid-compare run directory.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Build Hybrid Overlay Evaluation Report v1 from existing grid/WF artifacts."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = run_hybrid_eval_report(
+        settings,
+        hmm_baseline_grid_dir=hmm_baseline_grid_dir,
+        hmm_allow_only_grid_dir=hmm_allow_only_grid_dir,
+        hmm_block_veto_grid_dir=hmm_block_veto_grid_dir,
+        flow_allow_only_grid_dir=flow_allow_only_grid_dir,
+        wf_hmm_baseline_dir=wf_hmm_baseline_dir,
+        wf_hmm_hybrid_dir=wf_hmm_hybrid_dir,
+        compare_run_dir=compare_run_dir,
+        logger=logger,
+    )
+    summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    table_df = pl.read_csv(result.table_path)
+    if "single_candidate_score" in table_df.columns:
+        table_df = table_df.sort("single_candidate_score", descending=True, nulls_last=True)
+    compact_cols = [
+        col
+        for col in [
+            "run_label",
+            "overlay_mode",
+            "single_candidate_score",
+            "best_expectancy",
+            "best_pf",
+            "best_robustness_v2",
+            "best_ret_cv",
+            "best_trade_count",
+            "overlay_vetoed_signal_share",
+        ]
+        if col in table_df.columns
+    ]
+    compact_df = table_df.select(compact_cols).head(6) if compact_cols else table_df.head(6)
+    final = summary.get("final_verdicts", {})
+
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(
+        "recommendation: "
+        f"PRIMARY={final.get('PRIMARY_CANDIDATE')} "
+        f"SECONDARY={final.get('SECONDARY_CANDIDATE')} "
+        f"NEXT_EXPERIMENT={final.get('NEXT_EXPERIMENT')}"
+    )
+    typer.echo("top_runs:")
+    for row in compact_df.to_dicts():
+        typer.echo(
+            f"run={row.get('run_label')} mode={row.get('overlay_mode')} score={row.get('single_candidate_score')} "
+            f"exp={row.get('best_expectancy')} pf={row.get('best_pf')} rob_v2={row.get('best_robustness_v2')} "
+            f"ret_cv={row.get('best_ret_cv')} trades={row.get('best_trade_count')} "
+            f"veto_share={row.get('overlay_vetoed_signal_share')}"
+        )
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"table_path: {result.table_path}")
+    typer.echo(f"wf_table_path: {result.wf_table_path}")
     typer.echo(f"report_path: {result.report_path}")
 
 

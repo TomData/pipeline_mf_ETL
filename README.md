@@ -576,3 +576,32 @@ MVP simplifications:
 
 - Duplicate overlay keys are deduped deterministically by first row after key sort (`dedupe_rule=first`).
 - Overlay gating is a hard pass/veto filter only (no weighting/blending of signals yet).
+
+## Hybrid Overlay Evaluation Report v1
+
+`hybrid-eval-report` is an analysis-only command that reads existing Hybrid Overlay grid/WF artifacts and writes a compact decision report.
+
+- command:
+  - `python -m mf_etl.cli hybrid-eval-report`
+- default inputs are wired to current known run dirs (you can override with flags):
+  - HMM baseline grid
+  - HMM + overlay `allow_only` grid
+  - HMM + overlay `block_veto` grid
+  - optional FLOW + overlay `allow_only` comparator
+  - HMM WF baseline vs HMM WF hybrid
+  - optional prior `backtest-grid-compare` run
+- outputs:
+  - `artifacts/hybrid_eval_reports/<run_id>_hybrid_eval_v1/hybrid_eval_summary.json`
+  - `artifacts/hybrid_eval_reports/<run_id>_hybrid_eval_v1/hybrid_eval_table.csv`
+  - `artifacts/hybrid_eval_reports/<run_id>_hybrid_eval_v1/hybrid_eval_wf_table.csv`
+  - `artifacts/hybrid_eval_reports/<run_id>_hybrid_eval_v1/hybrid_eval_report.md`
+
+Decision heuristics (explicit):
+
+- single-run candidate score combines: expectancy, PF, robustness_v2, ret_cv (lower better), downside risk (lower better), zero-trade penalty.
+- WF consistency score combines hybrid split wins on: expectancy, PF, robustness_v2, ret_cv (lower better).
+- final labels:
+  - `PROMOTE`
+  - `KEEP_AS_BENCH`
+  - `NICHE_FILTER`
+  - `RESEARCH_ONLY`

@@ -157,6 +157,16 @@ backtest_policy_overlay:
   dedupe_rule: first
   enable_direction_conflict_metrics: true
 
+overlay_coverage_policy:
+  coverage_mode: warn_only
+  min_match_rate_warn: 0.80
+  min_match_rate_fail: 0.60
+  min_year_match_rate_warn: 0.70
+  min_year_match_rate_fail: 0.50
+  unknown_rate_warn: 0.25
+  unknown_rate_fail: 0.50
+  unknown_handling: treat_unknown_as_pass
+
 backtest_execution_realism:
   default_profile: none
   profiles:
@@ -235,6 +245,10 @@ candidate_rerun:
     trade_count_drop_pct_flag: 0.40
     exec_eligibility_drop_pct_flag: 0.20
     overlay_match_rate_min: 0.80
+    coverage_drift_warn_drop_abs: 0.10
+    coverage_drift_fail_match_rate: 0.60
+    coverage_unknown_increase_warn_abs: 0.15
+    coverage_unknown_rate_fail: 0.50
   micro_grid:
     enabled_default: false
     hold_bars_offsets: [-5, 0, 10]

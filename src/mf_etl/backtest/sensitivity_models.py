@@ -25,6 +25,14 @@ class SourceInputSpec:
     overlay_cluster_hardening_dir: Path | None = None
     overlay_mode: OverlayMode = "none"
     overlay_join_keys: list[str] | None = None
+    overlay_coverage_mode: Literal["warn_only", "strict_fail"] = "warn_only"
+    overlay_min_match_rate_warn: float | None = None
+    overlay_min_match_rate_fail: float | None = None
+    overlay_min_year_match_rate_warn: float | None = None
+    overlay_min_year_match_rate_fail: float | None = None
+    overlay_unknown_rate_warn: float | None = None
+    overlay_unknown_rate_fail: float | None = None
+    overlay_coverage_bypass: bool = False
 
 
 @dataclass(frozen=True, slots=True)

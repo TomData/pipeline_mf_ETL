@@ -289,8 +289,14 @@ def _apply_optional_overlay(
         overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
         overlay_mode=mode,  # type: ignore[arg-type]
         join_keys=overlay_join_keys or list(settings.backtest_policy_overlay.join_keys),
-        allow_unknown_for_block_veto=settings.backtest_policy_overlay.allow_unknown_for_block_veto,
-        min_overlay_match_rate_warn=settings.backtest_policy_overlay.min_overlay_match_rate_warn,
+        unknown_handling=settings.overlay_coverage_policy.unknown_handling,
+        min_match_rate_warn=settings.overlay_coverage_policy.min_match_rate_warn,
+        min_match_rate_fail=settings.overlay_coverage_policy.min_match_rate_fail,
+        min_year_match_rate_warn=settings.overlay_coverage_policy.min_year_match_rate_warn,
+        min_year_match_rate_fail=settings.overlay_coverage_policy.min_year_match_rate_fail,
+        unknown_rate_warn=settings.overlay_coverage_policy.unknown_rate_warn,
+        unknown_rate_fail=settings.overlay_coverage_policy.unknown_rate_fail,
+        coverage_mode="warn_only",
         logger=logger,
     )
     return overlay.frame, overlay.join_summary

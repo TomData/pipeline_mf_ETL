@@ -112,6 +112,8 @@ def summarize_grid_run(grid_run_dir: Path) -> dict[str, Any]:
         if overlay_enabled_count > 0:
             required_overlay_cols = [
                 "overlay_mode",
+                "overlay_coverage_mode",
+                "overlay_coverage_status",
                 "overlay_match_rate",
                 "overlay_unknown_rate",
                 "overlay_vetoed_signal_share",
@@ -133,6 +135,68 @@ def summarize_grid_run(grid_run_dir: Path) -> dict[str, Any]:
                 )
                 if bad_veto > 0:
                     errors.append("overlay_veto_share_invalid")
+            bad_match = int(
+                metrics.filter(
+                    pl.col("overlay_enabled")
+                    & (
+                        pl.col("overlay_match_rate").cast(pl.Float64, strict=False).is_null()
+                        | (~pl.col("overlay_match_rate").cast(pl.Float64, strict=False).is_finite())
+                        | (pl.col("overlay_match_rate") < 0)
+                        | (pl.col("overlay_match_rate") > 1)
+                    )
+                ).height
+            )
+            if bad_match > 0:
+                errors.append("overlay_match_rate_invalid")
+            bad_unknown = int(
+                metrics.filter(
+                    pl.col("overlay_enabled")
+                    & (
+                        pl.col("overlay_unknown_rate").cast(pl.Float64, strict=False).is_null()
+                        | (~pl.col("overlay_unknown_rate").cast(pl.Float64, strict=False).is_finite())
+                        | (pl.col("overlay_unknown_rate") < 0)
+                        | (pl.col("overlay_unknown_rate") > 1)
+                    )
+                ).height
+            )
+            if bad_unknown > 0:
+                errors.append("overlay_unknown_rate_invalid")
+
+            missing_coverage_files = 0
+            strict_fail_invalid = 0
+            for row in metrics.filter(pl.col("overlay_enabled") == True).select(
+                ["backtest_run_dir", "overlay_coverage_mode", "overlay_coverage_status"]
+            ).to_dicts():
+                run_dir_raw = row.get("backtest_run_dir")
+                if not run_dir_raw:
+                    continue
+                run_dir = Path(str(run_dir_raw))
+                verdict_path = run_dir / "overlay_coverage_verdict.json"
+                join_summary_path = run_dir / "overlay_join_summary.json"
+                if not verdict_path.exists():
+                    missing_coverage_files += 1
+                    continue
+                if not join_summary_path.exists():
+                    missing_coverage_files += 1
+                    continue
+                verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
+                summary_payload = json.loads(join_summary_path.read_text(encoding="utf-8"))
+                for key in ["match_rate", "unknown_rate"]:
+                    val = summary_payload.get(key)
+                    if val is None:
+                        errors.append(f"overlay_{key}_missing_in_join_summary")
+                        continue
+                    val_f = float(val)
+                    if val_f < 0 or val_f > 1:
+                        errors.append(f"overlay_{key}_out_of_range_in_join_summary")
+                mode = str(row.get("overlay_coverage_mode") or "warn_only")
+                status = str(verdict.get("status", ""))
+                if mode == "strict_fail" and status.startswith("FAIL"):
+                    strict_fail_invalid += 1
+            if missing_coverage_files > 0:
+                errors.append(f"missing_overlay_coverage_verdict_artifacts:{missing_coverage_files}")
+            if strict_fail_invalid > 0:
+                errors.append(f"overlay_strict_fail_verdict_present:{strict_fail_invalid}")
 
     if "execution_filters_enabled" in metrics.columns:
         exec_enabled_count = int(metrics.filter(pl.col("execution_filters_enabled") == True).height)

@@ -51,6 +51,19 @@ def _render_report(
         lines.append(f"- {row.get('candidate_label')}: {row.get('drift_status')} | reasons={reasons}")
     lines.append("")
 
+    if "coverage_drift_status" in candidate_table.columns:
+        lines.append("## Coverage Drift")
+        lines.append("| candidate | exp_match | obs_match | match_drop_abs | exp_unknown | obs_unknown | unknown_increase_abs | coverage_drift_status |")
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---|")
+        for row in candidate_table.sort("candidate_label").to_dicts():
+            lines.append(
+                f"| {row.get('candidate_label')} | {row.get('expected_overlay_match_rate')} | "
+                f"{row.get('observed_overlay_match_rate')} | {row.get('coverage_match_rate_drop_abs')} | "
+                f"{row.get('expected_overlay_unknown_rate')} | {row.get('observed_overlay_unknown_rate')} | "
+                f"{row.get('coverage_unknown_rate_increase_abs')} | {row.get('coverage_drift_status')} |"
+            )
+        lines.append("")
+
     lines.append("## WF Results")
     wf = summary.get("wf", {})
     if wf:
@@ -96,4 +109,3 @@ def write_candidate_rerun_reports(
         report_path,
     )
     return manifest_path, table_path, summary_path, report_path
-

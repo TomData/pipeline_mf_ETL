@@ -15,6 +15,7 @@ EquityMode = Literal["event_returns_only", "daily_equity_curve"]
 DirectionHint = Literal["LONG_BIAS", "SHORT_BIAS", "UNCONFIRMED"]
 PolicyFilterMode = Literal["allow_only", "allow_watch", "all_states"]
 OverlayMode = Literal["none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"]
+OverlayCoverageMode = Literal["warn_only", "strict_fail"]
 ExecutionProfileName = Literal["none", "lite", "strict"]
 
 
@@ -36,6 +37,14 @@ class BacktestRunConfig:
     overlay_cluster_hardening_dir: Path | None
     overlay_mode: OverlayMode
     overlay_join_keys: list[str]
+    overlay_coverage_mode: OverlayCoverageMode
+    overlay_min_match_rate_warn: float
+    overlay_min_match_rate_fail: float
+    overlay_min_year_match_rate_warn: float
+    overlay_min_year_match_rate_fail: float
+    overlay_unknown_rate_warn: float
+    overlay_unknown_rate_fail: float
+    overlay_coverage_bypass: bool
     execution_profile: ExecutionProfileName
     exec_min_price: float | None
     exec_min_dollar_vol20: float | None

@@ -34,13 +34,15 @@ from mf_etl.backtest.models import (
     EquityMode,
     ExitMode,
     InputType,
-    OverlayMode,
     ExecutionProfileName,
+    OverlayCoverageMode,
+    OverlayMode,
     PolicyFilterMode,
     SignalMode,
 )
 from mf_etl.backtest.portfolio import build_daily_equity_curve
 from mf_etl.backtest.policy_overlay import (
+    OverlayCoveragePolicyError,
     apply_policy_overlay,
     build_overlay_performance_breakdown,
 )
@@ -180,6 +182,14 @@ def run_backtest_run(
     overlay_cluster_hardening_dir: Path | None,
     overlay_mode: OverlayMode,
     overlay_join_keys: list[str] | None,
+    overlay_coverage_mode: OverlayCoverageMode,
+    overlay_min_match_rate_warn: float | None,
+    overlay_min_match_rate_fail: float | None,
+    overlay_min_year_match_rate_warn: float | None,
+    overlay_min_year_match_rate_fail: float | None,
+    overlay_unknown_rate_warn: float | None,
+    overlay_unknown_rate_fail: float | None,
+    overlay_coverage_bypass: bool,
     execution_profile: ExecutionProfileName,
     exec_min_price: float | None,
     exec_min_dollar_vol20: float | None,
@@ -218,6 +228,38 @@ def run_backtest_run(
         overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
         overlay_mode=overlay_mode,
         overlay_join_keys=(overlay_join_keys or list(settings.backtest_policy_overlay.join_keys)),
+        overlay_coverage_mode=overlay_coverage_mode,
+        overlay_min_match_rate_warn=float(
+            overlay_min_match_rate_warn
+            if overlay_min_match_rate_warn is not None
+            else settings.overlay_coverage_policy.min_match_rate_warn
+        ),
+        overlay_min_match_rate_fail=float(
+            overlay_min_match_rate_fail
+            if overlay_min_match_rate_fail is not None
+            else settings.overlay_coverage_policy.min_match_rate_fail
+        ),
+        overlay_min_year_match_rate_warn=float(
+            overlay_min_year_match_rate_warn
+            if overlay_min_year_match_rate_warn is not None
+            else settings.overlay_coverage_policy.min_year_match_rate_warn
+        ),
+        overlay_min_year_match_rate_fail=float(
+            overlay_min_year_match_rate_fail
+            if overlay_min_year_match_rate_fail is not None
+            else settings.overlay_coverage_policy.min_year_match_rate_fail
+        ),
+        overlay_unknown_rate_warn=float(
+            overlay_unknown_rate_warn
+            if overlay_unknown_rate_warn is not None
+            else settings.overlay_coverage_policy.unknown_rate_warn
+        ),
+        overlay_unknown_rate_fail=float(
+            overlay_unknown_rate_fail
+            if overlay_unknown_rate_fail is not None
+            else settings.overlay_coverage_policy.unknown_rate_fail
+        ),
+        overlay_coverage_bypass=bool(overlay_coverage_bypass),
         execution_profile=execution_profile,
         exec_min_price=exec_min_price,
         exec_min_dollar_vol20=exec_min_dollar_vol20,
@@ -276,26 +318,127 @@ def run_backtest_run(
         "overlay_watch_rate": None,
         "overlay_block_rate": None,
         "overlay_unknown_rate": None,
+        "unknown_rate": None,
+        "year_min_match_rate": None,
+        "year_p10_match_rate": None,
+        "year_fail_years": [],
+        "coverage_status": "OK",
+    }
+    overlay_coverage_verdict: dict[str, Any] = {
+        "coverage_mode": overlay_coverage_mode,
+        "thresholds": {
+            "min_match_rate_warn": float(
+                overlay_min_match_rate_warn
+                if overlay_min_match_rate_warn is not None
+                else settings.overlay_coverage_policy.min_match_rate_warn
+            ),
+            "min_match_rate_fail": float(
+                overlay_min_match_rate_fail
+                if overlay_min_match_rate_fail is not None
+                else settings.overlay_coverage_policy.min_match_rate_fail
+            ),
+            "min_year_match_rate_warn": float(
+                overlay_min_year_match_rate_warn
+                if overlay_min_year_match_rate_warn is not None
+                else settings.overlay_coverage_policy.min_year_match_rate_warn
+            ),
+            "min_year_match_rate_fail": float(
+                overlay_min_year_match_rate_fail
+                if overlay_min_year_match_rate_fail is not None
+                else settings.overlay_coverage_policy.min_year_match_rate_fail
+            ),
+            "unknown_rate_warn": float(
+                overlay_unknown_rate_warn
+                if overlay_unknown_rate_warn is not None
+                else settings.overlay_coverage_policy.unknown_rate_warn
+            ),
+            "unknown_rate_fail": float(
+                overlay_unknown_rate_fail
+                if overlay_unknown_rate_fail is not None
+                else settings.overlay_coverage_policy.unknown_rate_fail
+            ),
+        },
+        "summary": {
+            "match_rate": None,
+            "unknown_rate": None,
+            "year_min_match_rate": None,
+            "year_p10_match_rate": None,
+            "year_fail_years": [],
+        },
+        "status": "OK",
+        "reasons": [],
+        "strict_fail_triggered": False,
+        "unknown_handling": settings.overlay_coverage_policy.unknown_handling,
     }
     overlay_coverage_by_year = pl.DataFrame(schema={"year": pl.Int32})
     overlay_duplicate_keys = pl.DataFrame(schema={"dataset": pl.String})
     overlay_policy_mix = pl.DataFrame(schema={"overlay_policy_class": pl.String})
     if overlay_enabled:
+        unknown_handling = (
+            settings.overlay_coverage_policy.unknown_handling
+            if settings.overlay_coverage_policy.unknown_handling
+            else (
+                "treat_unknown_as_pass"
+                if settings.backtest_policy_overlay.allow_unknown_for_block_veto
+                else "treat_unknown_as_block"
+            )
+        )
         overlay_result = apply_policy_overlay(
             mapped,
             overlay_cluster_file=overlay_cluster_file,  # type: ignore[arg-type]
             overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,  # type: ignore[arg-type]
             overlay_mode=overlay_mode,
             join_keys=(overlay_join_keys or list(settings.backtest_policy_overlay.join_keys)),
-            allow_unknown_for_block_veto=settings.backtest_policy_overlay.allow_unknown_for_block_veto,
-            min_overlay_match_rate_warn=settings.backtest_policy_overlay.min_overlay_match_rate_warn,
+            unknown_handling=unknown_handling,
+            min_match_rate_warn=float(
+                overlay_min_match_rate_warn
+                if overlay_min_match_rate_warn is not None
+                else settings.overlay_coverage_policy.min_match_rate_warn
+            ),
+            min_match_rate_fail=float(
+                overlay_min_match_rate_fail
+                if overlay_min_match_rate_fail is not None
+                else settings.overlay_coverage_policy.min_match_rate_fail
+            ),
+            min_year_match_rate_warn=float(
+                overlay_min_year_match_rate_warn
+                if overlay_min_year_match_rate_warn is not None
+                else settings.overlay_coverage_policy.min_year_match_rate_warn
+            ),
+            min_year_match_rate_fail=float(
+                overlay_min_year_match_rate_fail
+                if overlay_min_year_match_rate_fail is not None
+                else settings.overlay_coverage_policy.min_year_match_rate_fail
+            ),
+            unknown_rate_warn=float(
+                overlay_unknown_rate_warn
+                if overlay_unknown_rate_warn is not None
+                else settings.overlay_coverage_policy.unknown_rate_warn
+            ),
+            unknown_rate_fail=float(
+                overlay_unknown_rate_fail
+                if overlay_unknown_rate_fail is not None
+                else settings.overlay_coverage_policy.unknown_rate_fail
+            ),
+            coverage_mode=overlay_coverage_mode,
             logger=effective_logger,
         )
         mapped = overlay_result.frame
         overlay_join_summary = overlay_result.join_summary
+        overlay_coverage_verdict = overlay_result.coverage_verdict
         overlay_coverage_by_year = overlay_result.coverage_by_year
         overlay_duplicate_keys = overlay_result.duplicate_keys
         overlay_policy_mix = overlay_result.policy_mix_on_primary
+        if (
+            overlay_coverage_mode == "strict_fail"
+            and not overlay_coverage_bypass
+            and str(overlay_coverage_verdict.get("status", "")).startswith("FAIL")
+        ):
+            raise OverlayCoveragePolicyError(
+                "overlay_coverage_strict_fail:"
+                f"{overlay_coverage_verdict.get('status')} reasons="
+                f"{';'.join(str(x) for x in (overlay_coverage_verdict.get('reasons') or []))}"
+            )
 
     execution_params = resolve_execution_realism_params(
         settings,
@@ -374,6 +517,7 @@ def run_backtest_run(
     symbol_csv = output_dir / "summary_by_symbol.csv"
     signal_diag_path = output_dir / "signal_diagnostics.json"
     overlay_join_summary_path = output_dir / "overlay_join_summary.json"
+    overlay_coverage_verdict_path = output_dir / "overlay_coverage_verdict.json"
     overlay_coverage_by_year_path = output_dir / "overlay_join_coverage_by_year.csv"
     overlay_duplicate_keys_path = output_dir / "overlay_join_duplicate_keys.csv"
     overlay_policy_mix_path = output_dir / "overlay_policy_mix_on_primary.csv"
@@ -487,6 +631,7 @@ def run_backtest_run(
     write_json_atomically(_finite_json(mapping_summary), output_dir / "state_policy_join_summary.json")
     if overlay_enabled:
         write_json_atomically(_finite_json(overlay_join_summary), overlay_join_summary_path)
+        write_json_atomically(_finite_json(overlay_coverage_verdict), overlay_coverage_verdict_path)
         write_csv_atomically(overlay_coverage_by_year, overlay_coverage_by_year_path)
         if overlay_duplicate_keys.height > 0:
             write_csv_atomically(overlay_duplicate_keys, overlay_duplicate_keys_path)
@@ -531,8 +676,16 @@ def run_backtest_run(
         "overlay": {
             "overlay_enabled": bool(overlay_enabled),
             "overlay_mode": str(overlay_mode),
+            "overlay_coverage_mode": overlay_coverage_mode,
+            "overlay_coverage_bypass": bool(overlay_coverage_bypass),
             "overlay_match_rate": _safe_float(overlay_join_summary.get("match_rate")),
             "overlay_unknown_rate": _safe_float(overlay_join_summary.get("overlay_unknown_rate")),
+            "overlay_unknown_handling": overlay_join_summary.get("unknown_handling"),
+            "overlay_year_min_match_rate": _safe_float(overlay_join_summary.get("year_min_match_rate")),
+            "overlay_year_p10_match_rate": _safe_float(overlay_join_summary.get("year_p10_match_rate")),
+            "overlay_year_fail_years": overlay_join_summary.get("year_fail_years", []),
+            "overlay_coverage_status": overlay_join_summary.get("coverage_status"),
+            "overlay_coverage_reasons": overlay_join_summary.get("coverage_reasons", []),
             "overlay_allow_rate": _safe_float(overlay_join_summary.get("overlay_allow_rate")),
             "overlay_watch_rate": _safe_float(overlay_join_summary.get("overlay_watch_rate")),
             "overlay_block_rate": _safe_float(overlay_join_summary.get("overlay_block_rate")),
@@ -552,6 +705,7 @@ def run_backtest_run(
                 signal_result.diagnostics.get("overlay_direction_conflict_share")
             ),
             "overlay_join_summary": overlay_join_summary,
+            "overlay_coverage_verdict": overlay_coverage_verdict,
         },
         "execution": {
             "execution_profile": execution_params.profile_name,
@@ -657,6 +811,7 @@ def run_backtest_run(
             "signal_diagnostics": str(signal_diag_path),
             "report": str(report_path),
             "overlay_join_summary": str(overlay_join_summary_path) if overlay_enabled else None,
+            "overlay_coverage_verdict": str(overlay_coverage_verdict_path) if overlay_enabled else None,
             "overlay_policy_mix_on_primary": str(overlay_policy_mix_path) if overlay_enabled else None,
             "overlay_signal_effect_summary": str(overlay_signal_effect_path) if overlay_enabled else None,
             "overlay_performance_breakdown": str(overlay_perf_path) if overlay_enabled else None,
@@ -842,6 +997,14 @@ def run_backtest_walkforward(
     overlay_cluster_hardening_dir: Path | None,
     overlay_mode: OverlayMode,
     overlay_join_keys: list[str] | None,
+    overlay_coverage_mode: OverlayCoverageMode,
+    overlay_min_match_rate_warn: float | None,
+    overlay_min_match_rate_fail: float | None,
+    overlay_min_year_match_rate_warn: float | None,
+    overlay_min_year_match_rate_fail: float | None,
+    overlay_unknown_rate_warn: float | None,
+    overlay_unknown_rate_fail: float | None,
+    overlay_coverage_bypass: bool,
     execution_profile: ExecutionProfileName,
     exec_min_price: float | None,
     exec_min_dollar_vol20: float | None,
@@ -942,6 +1105,14 @@ def run_backtest_walkforward(
                     overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
                     overlay_mode=overlay_mode,
                     overlay_join_keys=overlay_join_keys,
+                    overlay_coverage_mode=overlay_coverage_mode,
+                    overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+                    overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+                    overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+                    overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+                    overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+                    overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+                    overlay_coverage_bypass=overlay_coverage_bypass,
                     execution_profile=execution_profile,
                     exec_min_price=exec_min_price,
                     exec_min_dollar_vol20=exec_min_dollar_vol20,
@@ -988,8 +1159,10 @@ def run_backtest_walkforward(
                         "model": model_name,
                         "overlay_enabled": bool(overlay.get("overlay_enabled")),
                         "overlay_mode": overlay.get("overlay_mode"),
+                        "overlay_coverage_mode": overlay.get("overlay_coverage_mode"),
                         "overlay_match_rate": _safe_float(overlay.get("overlay_match_rate")),
                         "overlay_unknown_rate": _safe_float(overlay.get("overlay_unknown_rate")),
+                        "overlay_coverage_status": overlay.get("overlay_coverage_status"),
                         "overlay_vetoed_signal_share": _safe_float(overlay.get("overlay_vetoed_signal_share")),
                         "overlay_direction_conflict_share": _safe_float(
                             overlay.get("overlay_direction_conflict_share")
@@ -1033,6 +1206,8 @@ def run_backtest_walkforward(
         "generated_ts": datetime.now(timezone.utc).isoformat(),
         "overlay_enabled": bool(overlay_cluster_file is not None and overlay_cluster_hardening_dir is not None),
         "overlay_mode": overlay_mode,
+        "overlay_coverage_mode": overlay_coverage_mode,
+        "overlay_coverage_bypass": bool(overlay_coverage_bypass),
         "execution_profile": execution_profile,
         "exec_overrides": {
             "exec_min_price": exec_min_price,

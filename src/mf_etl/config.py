@@ -265,6 +265,21 @@ class BacktestPolicyOverlayConfig(BaseModel):
     enable_direction_conflict_metrics: bool = True
 
 
+class OverlayCoveragePolicyConfig(BaseModel):
+    """Coverage guardrails for overlay join quality and UNKNOWN prevalence."""
+
+    coverage_mode: Literal["warn_only", "strict_fail"] = "warn_only"
+    min_match_rate_warn: float = Field(default=0.80, ge=0.0, le=1.0)
+    min_match_rate_fail: float = Field(default=0.60, ge=0.0, le=1.0)
+    min_year_match_rate_warn: float = Field(default=0.70, ge=0.0, le=1.0)
+    min_year_match_rate_fail: float = Field(default=0.50, ge=0.0, le=1.0)
+    unknown_rate_warn: float = Field(default=0.25, ge=0.0, le=1.0)
+    unknown_rate_fail: float = Field(default=0.50, ge=0.0, le=1.0)
+    unknown_handling: Literal["treat_unknown_as_pass", "treat_unknown_as_block"] = (
+        "treat_unknown_as_pass"
+    )
+
+
 class BacktestExecutionRealismProfileConfig(BaseModel):
     """One execution realism profile definition."""
 
@@ -412,6 +427,10 @@ class CandidateRerunDriftThresholdsConfig(BaseModel):
     trade_count_drop_pct_flag: float = Field(default=0.40, ge=0.0)
     exec_eligibility_drop_pct_flag: float = Field(default=0.20, ge=0.0)
     overlay_match_rate_min: float = Field(default=0.80, ge=0.0, le=1.0)
+    coverage_drift_warn_drop_abs: float = Field(default=0.10, ge=0.0, le=1.0)
+    coverage_drift_fail_match_rate: float = Field(default=0.60, ge=0.0, le=1.0)
+    coverage_unknown_increase_warn_abs: float = Field(default=0.15, ge=0.0, le=1.0)
+    coverage_unknown_rate_fail: float = Field(default=0.50, ge=0.0, le=1.0)
 
 
 class CandidateRerunMicroGridConfig(BaseModel):
@@ -638,6 +657,7 @@ class AppSettings(BaseSettings):
     cluster_hardening: ClusterHardeningConfig = Field(default_factory=ClusterHardeningConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     backtest_policy_overlay: BacktestPolicyOverlayConfig = Field(default_factory=BacktestPolicyOverlayConfig)
+    overlay_coverage_policy: OverlayCoveragePolicyConfig = Field(default_factory=OverlayCoveragePolicyConfig)
     backtest_execution_realism: BacktestExecutionRealismConfig = Field(
         default_factory=BacktestExecutionRealismConfig
     )

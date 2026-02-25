@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import polars as pl
 
 OverlayMode = Literal["none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"]
+OverlayCoverageMode = Literal["warn_only", "strict_fail"]
+OverlayUnknownHandling = Literal["treat_unknown_as_pass", "treat_unknown_as_block"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,7 +18,7 @@ class PolicyOverlayResult:
 
     frame: pl.DataFrame
     join_summary: dict[str, object]
+    coverage_verdict: dict[str, Any]
     coverage_by_year: pl.DataFrame
     duplicate_keys: pl.DataFrame
     policy_mix_on_primary: pl.DataFrame
-

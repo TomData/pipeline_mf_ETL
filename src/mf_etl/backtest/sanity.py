@@ -78,18 +78,52 @@ def summarize_backtest_run(run_dir: Path) -> dict[str, Any]:
     if overlay and bool(overlay.get("overlay_enabled")):
         required_overlay = [
             run_dir / "overlay_join_summary.json",
+            run_dir / "overlay_coverage_verdict.json",
             run_dir / "overlay_policy_mix_on_primary.csv",
             run_dir / "overlay_signal_effect_summary.json",
         ]
         for path in required_overlay:
             if not path.exists():
                 errors.append(f"missing_overlay_artifact:{path.name}")
+        overlay_join_summary_path = run_dir / "overlay_join_summary.json"
+        overlay_verdict_path = run_dir / "overlay_coverage_verdict.json"
+        overlay_join_payload = (
+            json.loads(overlay_join_summary_path.read_text(encoding="utf-8"))
+            if overlay_join_summary_path.exists()
+            else {}
+        )
+        overlay_verdict_payload = (
+            json.loads(overlay_verdict_path.read_text(encoding="utf-8"))
+            if overlay_verdict_path.exists()
+            else {}
+        )
+        match_rate = overlay_join_payload.get("match_rate")
+        if match_rate is None:
+            errors.append("overlay_match_rate_missing")
+        else:
+            match_rate_f = float(match_rate)
+            if not (0.0 <= match_rate_f <= 1.0):
+                errors.append("overlay_match_rate_out_of_range")
+        unknown_rate = overlay_join_payload.get("unknown_rate")
+        if unknown_rate is None:
+            errors.append("overlay_unknown_rate_missing")
+        else:
+            unknown_rate_f = float(unknown_rate)
+            if not (0.0 <= unknown_rate_f <= 1.0):
+                errors.append("overlay_unknown_rate_out_of_range")
+        coverage_status = str(overlay_verdict_payload.get("status", ""))
+        coverage_mode = str(overlay.get("overlay_coverage_mode", "warn_only"))
+        coverage_bypass = bool(overlay.get("overlay_coverage_bypass", False))
+        if coverage_mode == "strict_fail" and (not coverage_bypass) and coverage_status.startswith("FAIL"):
+            errors.append("overlay_strict_fail_verdict_present")
         veto_share = overlay.get("overlay_vetoed_signal_share")
         veto_value = float(veto_share) if veto_share is not None else None
         if veto_value is not None and not (0.0 <= veto_value <= 1.0):
             errors.append("overlay_vetoed_signal_share_out_of_range")
         overlay_info = {
             "overlay_mode": overlay.get("overlay_mode"),
+            "overlay_coverage_mode": overlay.get("overlay_coverage_mode"),
+            "overlay_coverage_status": overlay.get("overlay_coverage_status"),
             "overlay_match_rate": overlay.get("overlay_match_rate"),
             "overlay_unknown_rate": overlay.get("overlay_unknown_rate"),
             "overlay_vetoed_signal_share": overlay.get("overlay_vetoed_signal_share"),

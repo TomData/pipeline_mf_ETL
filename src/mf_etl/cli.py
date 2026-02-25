@@ -3464,6 +3464,32 @@ def backtest_run(
         "--overlay-join-keys",
         help="Comma-separated join keys. Default: ticker,trade_date",
     ),
+    overlay_coverage_mode: str | None = typer.Option(
+        None,
+        "--overlay-coverage-mode",
+        help="Overlay coverage policy mode: warn_only or strict_fail.",
+    ),
+    overlay_min_match_rate_warn: float | None = typer.Option(
+        None, "--overlay-min-match-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_min_match_rate_fail: float | None = typer.Option(
+        None, "--overlay-min-match-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_unknown_rate_warn: float | None = typer.Option(
+        None, "--overlay-unknown-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_unknown_rate_fail: float | None = typer.Option(
+        None, "--overlay-unknown-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_min_year_match_rate_warn: float | None = typer.Option(
+        None, "--overlay-min-year-match-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_min_year_match_rate_fail: float | None = typer.Option(
+        None, "--overlay-min-year-match-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_coverage_bypass: bool = typer.Option(
+        False, "--overlay-coverage-bypass", help="Bypass strict coverage fail and proceed."
+    ),
     exec_profile: str | None = typer.Option(
         None,
         "--exec-profile",
@@ -3550,6 +3576,11 @@ def backtest_run(
         allowed={"none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"},
         option_name="overlay-mode",
     )
+    overlay_coverage_mode_norm = _normalize_choice(
+        overlay_coverage_mode,
+        allowed={"warn_only", "strict_fail"},
+        option_name="overlay-coverage-mode",
+    )
     exec_profile_norm = _normalize_choice(
         exec_profile,
         allowed={"none", "lite", "strict"},
@@ -3595,6 +3626,17 @@ def backtest_run(
             overlay_mode_norm or settings.backtest_policy_overlay.default_overlay_mode,
         ),
         overlay_join_keys=overlay_keys,
+        overlay_coverage_mode=cast(
+            str,
+            overlay_coverage_mode_norm or settings.overlay_coverage_policy.coverage_mode,
+        ),
+        overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+        overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+        overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+        overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+        overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+        overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+        overlay_coverage_bypass=overlay_coverage_bypass,
         execution_profile=cast(
             str,
             exec_profile_norm or settings.backtest_execution_realism.default_profile,
@@ -3783,6 +3825,32 @@ def backtest_wf_run(
         "--overlay-join-keys",
         help="Comma-separated join keys. Default: ticker,trade_date",
     ),
+    overlay_coverage_mode: str | None = typer.Option(
+        None,
+        "--overlay-coverage-mode",
+        help="Overlay coverage policy mode: warn_only or strict_fail.",
+    ),
+    overlay_min_match_rate_warn: float | None = typer.Option(
+        None, "--overlay-min-match-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_min_match_rate_fail: float | None = typer.Option(
+        None, "--overlay-min-match-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_unknown_rate_warn: float | None = typer.Option(
+        None, "--overlay-unknown-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_unknown_rate_fail: float | None = typer.Option(
+        None, "--overlay-unknown-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_min_year_match_rate_warn: float | None = typer.Option(
+        None, "--overlay-min-year-match-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_min_year_match_rate_fail: float | None = typer.Option(
+        None, "--overlay-min-year-match-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_coverage_bypass: bool = typer.Option(
+        False, "--overlay-coverage-bypass", help="Bypass strict coverage fail and proceed."
+    ),
     exec_profile: str | None = typer.Option(
         None,
         "--exec-profile",
@@ -3839,6 +3907,11 @@ def backtest_wf_run(
         allowed={"none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"},
         option_name="overlay-mode",
     )
+    overlay_coverage_mode_norm = _normalize_choice(
+        overlay_coverage_mode,
+        allowed={"warn_only", "strict_fail"},
+        option_name="overlay-coverage-mode",
+    )
     exec_profile_norm = _normalize_choice(
         exec_profile,
         allowed={"none", "lite", "strict"},
@@ -3871,6 +3944,17 @@ def backtest_wf_run(
             overlay_mode_norm or settings.backtest_policy_overlay.default_overlay_mode,
         ),
         overlay_join_keys=overlay_keys,
+        overlay_coverage_mode=cast(
+            str,
+            overlay_coverage_mode_norm or settings.overlay_coverage_policy.coverage_mode,
+        ),
+        overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+        overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+        overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+        overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+        overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+        overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+        overlay_coverage_bypass=overlay_coverage_bypass,
         execution_profile=cast(
             str,
             exec_profile_norm or settings.backtest_execution_realism.default_profile,
@@ -4000,6 +4084,32 @@ def backtest_grid_run(
         "--overlay-join-keys",
         help="Comma-separated join keys. Default: ticker,trade_date",
     ),
+    overlay_coverage_mode: str | None = typer.Option(
+        None,
+        "--overlay-coverage-mode",
+        help="Overlay coverage policy mode: warn_only or strict_fail.",
+    ),
+    overlay_min_match_rate_warn: float | None = typer.Option(
+        None, "--overlay-min-match-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_min_match_rate_fail: float | None = typer.Option(
+        None, "--overlay-min-match-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_unknown_rate_warn: float | None = typer.Option(
+        None, "--overlay-unknown-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_unknown_rate_fail: float | None = typer.Option(
+        None, "--overlay-unknown-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_min_year_match_rate_warn: float | None = typer.Option(
+        None, "--overlay-min-year-match-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_min_year_match_rate_fail: float | None = typer.Option(
+        None, "--overlay-min-year-match-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_coverage_bypass: bool = typer.Option(
+        False, "--overlay-coverage-bypass", help="Bypass strict coverage fail and proceed."
+    ),
     exec_profile: str | None = typer.Option(
         None,
         "--exec-profile",
@@ -4075,6 +4185,11 @@ def backtest_grid_run(
         allowed={"none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"},
         option_name="overlay-mode",
     ) or settings.backtest_policy_overlay.default_overlay_mode
+    overlay_coverage_mode_norm = _normalize_choice(
+        overlay_coverage_mode,
+        allowed={"warn_only", "strict_fail"},
+        option_name="overlay-coverage-mode",
+    ) or settings.overlay_coverage_policy.coverage_mode
     exec_profile_norm = _normalize_choice(
         exec_profile,
         allowed={"none", "lite", "strict"},
@@ -4117,6 +4232,14 @@ def backtest_grid_run(
                     overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
                     overlay_mode=cast(str, overlay_mode_norm),
                     overlay_join_keys=overlay_join_keys_norm,
+                    overlay_coverage_mode=cast(str, overlay_coverage_mode_norm),
+                    overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+                    overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+                    overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+                    overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+                    overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+                    overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+                    overlay_coverage_bypass=overlay_coverage_bypass,
                 )
             )
         if hmm_input_file is not None:
@@ -4130,6 +4253,14 @@ def backtest_grid_run(
                     overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
                     overlay_mode=cast(str, overlay_mode_norm),
                     overlay_join_keys=overlay_join_keys_norm,
+                    overlay_coverage_mode=cast(str, overlay_coverage_mode_norm),
+                    overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+                    overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+                    overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+                    overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+                    overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+                    overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+                    overlay_coverage_bypass=overlay_coverage_bypass,
                 )
             )
         if cluster_input_file is not None:
@@ -4143,6 +4274,14 @@ def backtest_grid_run(
                     overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
                     overlay_mode=cast(str, overlay_mode_norm),
                     overlay_join_keys=overlay_join_keys_norm,
+                    overlay_coverage_mode=cast(str, overlay_coverage_mode_norm),
+                    overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+                    overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+                    overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+                    overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+                    overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+                    overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+                    overlay_coverage_bypass=overlay_coverage_bypass,
                 )
             )
         if len(source_specs) < 2:
@@ -4165,6 +4304,14 @@ def backtest_grid_run(
                 overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
                 overlay_mode=cast(str, overlay_mode_norm),
                 overlay_join_keys=overlay_join_keys_norm,
+                overlay_coverage_mode=cast(str, overlay_coverage_mode_norm),
+                overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+                overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+                overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+                overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+                overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+                overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+                overlay_coverage_bypass=overlay_coverage_bypass,
             )
         )
 
@@ -4371,6 +4518,32 @@ def backtest_grid_wf_run(
         "--overlay-join-keys",
         help="Comma-separated join keys. Default: ticker,trade_date",
     ),
+    overlay_coverage_mode: str | None = typer.Option(
+        None,
+        "--overlay-coverage-mode",
+        help="Overlay coverage policy mode: warn_only or strict_fail.",
+    ),
+    overlay_min_match_rate_warn: float | None = typer.Option(
+        None, "--overlay-min-match-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_min_match_rate_fail: float | None = typer.Option(
+        None, "--overlay-min-match-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_unknown_rate_warn: float | None = typer.Option(
+        None, "--overlay-unknown-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_unknown_rate_fail: float | None = typer.Option(
+        None, "--overlay-unknown-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_min_year_match_rate_warn: float | None = typer.Option(
+        None, "--overlay-min-year-match-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_min_year_match_rate_fail: float | None = typer.Option(
+        None, "--overlay-min-year-match-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_coverage_bypass: bool = typer.Option(
+        False, "--overlay-coverage-bypass", help="Bypass strict coverage fail and proceed."
+    ),
     exec_profile: str | None = typer.Option(
         None,
         "--exec-profile",
@@ -4436,6 +4609,11 @@ def backtest_grid_wf_run(
         allowed={"none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"},
         option_name="overlay-mode",
     ) or settings.backtest_policy_overlay.default_overlay_mode
+    overlay_coverage_mode_norm = _normalize_choice(
+        overlay_coverage_mode,
+        allowed={"warn_only", "strict_fail"},
+        option_name="overlay-coverage-mode",
+    ) or settings.overlay_coverage_policy.coverage_mode
     exec_profile_norm = _normalize_choice(
         exec_profile,
         allowed={"none", "lite", "strict"},
@@ -4480,6 +4658,14 @@ def backtest_grid_wf_run(
         overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
         overlay_mode=cast(str, overlay_mode_norm),
         overlay_join_keys=overlay_join_keys_norm,
+        overlay_coverage_mode=cast(str, overlay_coverage_mode_norm),
+        overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+        overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+        overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+        overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+        overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+        overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+        overlay_coverage_bypass=overlay_coverage_bypass,
         train_ends=train_ends_norm,
         train_start=train_start,
         train_end_final=train_end_final,
@@ -5292,6 +5478,46 @@ def candidate_rerun_run(
         "--run-micro-grid/--no-run-micro-grid",
         help="Run small local sensitivity grid around locked config; default from settings.",
     ),
+    overlay_coverage_mode: str | None = typer.Option(
+        None,
+        "--overlay-coverage-mode",
+        help="Overlay coverage policy mode for reruns: warn_only or strict_fail.",
+    ),
+    overlay_min_match_rate_warn: float | None = typer.Option(
+        None, "--overlay-min-match-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_min_match_rate_fail: float | None = typer.Option(
+        None, "--overlay-min-match-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_unknown_rate_warn: float | None = typer.Option(
+        None, "--overlay-unknown-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_unknown_rate_fail: float | None = typer.Option(
+        None, "--overlay-unknown-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_min_year_match_rate_warn: float | None = typer.Option(
+        None, "--overlay-min-year-match-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_min_year_match_rate_fail: float | None = typer.Option(
+        None, "--overlay-min-year-match-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_coverage_bypass: bool = typer.Option(
+        False, "--overlay-coverage-bypass", help="Bypass strict coverage fail and proceed."
+    ),
+    coverage_drift_warn_drop: float | None = typer.Option(
+        None,
+        "--coverage-drift-warn-drop",
+        min=0.0,
+        max=1.0,
+        help="Absolute match-rate drop threshold for DRIFT_WARN.",
+    ),
+    coverage_drift_fail_match: float | None = typer.Option(
+        None,
+        "--coverage-drift-fail-match",
+        min=0.0,
+        max=1.0,
+        help="Observed match-rate threshold for DRIFT_FAIL.",
+    ),
     config_file: Path | None = typer.Option(
         None,
         "--config-file",
@@ -5305,6 +5531,11 @@ def candidate_rerun_run(
     """Run Candidate Re-run Pack v1 from a Production Candidate Pack directory."""
 
     settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    overlay_coverage_mode_norm = _normalize_choice(
+        overlay_coverage_mode,
+        allowed={"warn_only", "strict_fail"},
+        option_name="overlay-coverage-mode",
+    )
     result = run_candidate_rerun_pack(
         settings,
         pcp_pack_dir=pcp_pack_dir,
@@ -5312,6 +5543,16 @@ def candidate_rerun_run(
         wf_run_dir=wf_run_dir,
         override_input_file=override_input_file,
         run_micro_grid=run_micro_grid,
+        overlay_coverage_mode=overlay_coverage_mode_norm,
+        overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+        overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+        overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+        overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+        overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+        overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+        overlay_coverage_bypass=overlay_coverage_bypass,
+        coverage_drift_warn_drop=coverage_drift_warn_drop,
+        coverage_drift_fail_match=coverage_drift_fail_match,
         logger=logger,
     )
     table = pl.read_csv(result.candidates_table_path)

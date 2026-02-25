@@ -558,6 +558,11 @@ Hybrid overlay conditions a primary state engine (HMM/FLOW) with cluster hardeni
   - `--overlay-cluster-hardening-dir`
   - `--overlay-mode`
   - `--overlay-join-keys` (default: `ticker,trade_date`)
+  - `--overlay-coverage-mode` (`warn_only` or `strict_fail`)
+  - `--overlay-min-match-rate-warn`, `--overlay-min-match-rate-fail`
+  - `--overlay-min-year-match-rate-warn`, `--overlay-min-year-match-rate-fail`
+  - `--overlay-unknown-rate-warn`, `--overlay-unknown-rate-fail`
+  - `--overlay-coverage-bypass`
 - commands with overlay support:
   - `backtest-run`
   - `backtest-wf-run`
@@ -568,6 +573,7 @@ Overlay artifacts (when enabled):
 
 - `overlay_join_summary.json`
 - `overlay_join_coverage_by_year.csv`
+- `overlay_coverage_verdict.json`
 - `overlay_policy_mix_on_primary.csv`
 - `overlay_signal_effect_summary.json`
 - `overlay_performance_breakdown.csv`
@@ -576,6 +582,7 @@ MVP simplifications:
 
 - Duplicate overlay keys are deduped deterministically by first row after key sort (`dedupe_rule=first`).
 - Overlay gating is a hard pass/veto filter only (no weighting/blending of signals yet).
+- Strict coverage checks evaluate join diagnostics before signal generation. In `strict_fail`, a FAIL verdict aborts the run unless `--overlay-coverage-bypass` is set.
 
 ## Hybrid Overlay Evaluation Report v1
 
@@ -761,6 +768,10 @@ CRP behavior:
 - optional micro-grid around locked config (small local sensitivity probe)
 - optional WF single-combo rerun per candidate when `--wf-run-dir` is provided
 - computes deltas and drift status (`OK`, `DRIFT_WARN`, `DRIFT_FAIL`)
+- computes overlay coverage drift for overlay-enabled candidates:
+  - `match_rate` absolute drop vs PCP baseline
+  - `unknown_rate` absolute increase vs PCP baseline
+  - escalates to `DRIFT_FAIL` on hard coverage breaches
 
 CRP outputs:
 
@@ -772,4 +783,5 @@ CRP outputs:
   - `candidates/<CANDIDATE>/backtest_run_dir.txt`
   - `candidates/<CANDIDATE>/backtest_summary.json`
   - `candidates/<CANDIDATE>/drift_metrics.json`
+  - `candidates/<CANDIDATE>/coverage_drift_metrics.json`
   - optional `micro_grid_dir.txt`

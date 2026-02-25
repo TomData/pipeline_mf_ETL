@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import numpy as np
@@ -209,11 +209,90 @@ def _compute_drift(
     }
 
 
+def _compute_coverage_drift(
+    *,
+    baseline_match_rate: float | None,
+    baseline_unknown_rate: float | None,
+    observed_match_rate: float | None,
+    observed_unknown_rate: float | None,
+    settings: AppSettings,
+    warn_drop_abs: float | None,
+    fail_match_rate: float | None,
+) -> dict[str, Any]:
+    thr = settings.candidate_rerun.drift
+    warn_drop = float(
+        warn_drop_abs if warn_drop_abs is not None else thr.coverage_drift_warn_drop_abs
+    )
+    fail_match = float(
+        fail_match_rate if fail_match_rate is not None else thr.coverage_drift_fail_match_rate
+    )
+    unknown_warn = float(thr.coverage_unknown_increase_warn_abs)
+    unknown_fail = float(thr.coverage_unknown_rate_fail)
+
+    if baseline_match_rate is None and observed_match_rate is not None:
+        baseline_match_rate = observed_match_rate
+    if baseline_unknown_rate is None and observed_unknown_rate is not None:
+        baseline_unknown_rate = observed_unknown_rate
+
+    match_rate_drop_abs = (
+        (baseline_match_rate - observed_match_rate)
+        if (baseline_match_rate is not None and observed_match_rate is not None)
+        else None
+    )
+    unknown_rate_increase_abs = (
+        (observed_unknown_rate - baseline_unknown_rate)
+        if (baseline_unknown_rate is not None and observed_unknown_rate is not None)
+        else None
+    )
+
+    flags: list[str] = []
+    if match_rate_drop_abs is not None and match_rate_drop_abs > warn_drop:
+        flags.append("coverage_match_rate_drop_warn")
+    if observed_match_rate is not None and observed_match_rate < fail_match:
+        flags.append("coverage_match_rate_below_fail")
+    if unknown_rate_increase_abs is not None and unknown_rate_increase_abs > unknown_warn:
+        flags.append("coverage_unknown_rate_increase_warn")
+    if observed_unknown_rate is not None and observed_unknown_rate > unknown_fail:
+        flags.append("coverage_unknown_rate_above_fail")
+
+    if "coverage_match_rate_below_fail" in flags or "coverage_unknown_rate_above_fail" in flags:
+        status = "DRIFT_FAIL"
+    elif len(flags) > 0:
+        status = "DRIFT_WARN"
+    else:
+        status = "OK"
+
+    return {
+        "baseline_match_rate": baseline_match_rate,
+        "observed_match_rate": observed_match_rate,
+        "match_rate_drop_abs": _safe_float(match_rate_drop_abs),
+        "baseline_unknown_rate": baseline_unknown_rate,
+        "observed_unknown_rate": observed_unknown_rate,
+        "unknown_rate_increase_abs": _safe_float(unknown_rate_increase_abs),
+        "thresholds": {
+            "warn_drop_abs": warn_drop,
+            "fail_match_rate": fail_match,
+            "unknown_increase_warn_abs": unknown_warn,
+            "unknown_rate_fail": unknown_fail,
+        },
+        "flags": flags,
+        "coverage_drift_status": status,
+    }
+
+
 def _build_source_spec_from_candidate(
     *,
     candidate: dict[str, Any],
     input_file: Path,
     validation_run_dir: Path | None,
+    overlay_coverage_mode: str,
+    overlay_min_match_rate_warn: float | None,
+    overlay_min_match_rate_fail: float | None,
+    overlay_min_year_match_rate_warn: float | None,
+    overlay_min_year_match_rate_fail: float | None,
+    overlay_unknown_rate_warn: float | None,
+    overlay_unknown_rate_fail: float | None,
+    overlay_coverage_bypass: bool,
 ) -> SourceInputSpec:
     overlay = candidate.get("overlay", {})
     return SourceInputSpec(
@@ -227,6 +306,14 @@ def _build_source_spec_from_candidate(
         overlay_cluster_hardening_dir=Path(str(overlay.get("overlay_cluster_hardening_dir"))) if overlay.get("overlay_cluster_hardening_dir") else None,
         overlay_mode=str(overlay.get("mode", "none")),  # type: ignore[arg-type]
         overlay_join_keys=["ticker", "trade_date"],
+        overlay_coverage_mode=cast(str, overlay_coverage_mode),
+        overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+        overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+        overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+        overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+        overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+        overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+        overlay_coverage_bypass=overlay_coverage_bypass,
     )
 
 
@@ -284,6 +371,16 @@ def run_candidate_rerun_pack(
     wf_run_dir: Path | None,
     override_input_file: Path | None,
     run_micro_grid: bool | None,
+    overlay_coverage_mode: str | None,
+    overlay_min_match_rate_warn: float | None,
+    overlay_min_match_rate_fail: float | None,
+    overlay_unknown_rate_warn: float | None,
+    overlay_unknown_rate_fail: float | None,
+    overlay_min_year_match_rate_warn: float | None,
+    overlay_min_year_match_rate_fail: float | None,
+    overlay_coverage_bypass: bool,
+    coverage_drift_warn_drop: float | None,
+    coverage_drift_fail_match: float | None,
     logger: logging.Logger | None = None,
 ) -> CandidateRerunPackResult:
     """Rerun PCP candidates and generate drift/consistency artifacts."""
@@ -308,6 +405,11 @@ def run_candidate_rerun_pack(
         settings.candidate_rerun.micro_grid.enabled_default
         if run_micro_grid is None
         else run_micro_grid
+    )
+    coverage_mode_effective = (
+        overlay_coverage_mode
+        if overlay_coverage_mode is not None
+        else settings.overlay_coverage_policy.coverage_mode
     )
 
     candidate_rows: list[dict[str, Any]] = []
@@ -364,6 +466,14 @@ def run_candidate_rerun_pack(
             else None,
             overlay_mode=str(overlay.get("mode", "none")),  # type: ignore[arg-type]
             overlay_join_keys=["ticker", "trade_date"],
+            overlay_coverage_mode=cast(str, coverage_mode_effective),
+            overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+            overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+            overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+            overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+            overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+            overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+            overlay_coverage_bypass=overlay_coverage_bypass,
             execution_profile=str(execution.get("profile", settings.backtest_execution_realism.default_profile)),  # type: ignore[arg-type]
             exec_min_price=_safe_float((execution.get("thresholds_used") or {}).get("min_price")),
             exec_min_dollar_vol20=_safe_float((execution.get("thresholds_used") or {}).get("min_dollar_vol20")),
@@ -392,11 +502,44 @@ def run_candidate_rerun_pack(
             observed=observed,
             settings=settings,
         )
+        overlay_join_summary_path = bt_result.output_dir / "overlay_join_summary.json"
+        overlay_join_summary = (
+            _read_json(overlay_join_summary_path) if overlay_join_summary_path.exists() else {}
+        )
+        coverage_drift = _compute_coverage_drift(
+            baseline_match_rate=_safe_float((overlay or {}).get("match_rate")),
+            baseline_unknown_rate=_safe_float((overlay or {}).get("unknown_rate")),
+            observed_match_rate=_safe_float(overlay_join_summary.get("match_rate")),
+            observed_unknown_rate=_safe_float(overlay_join_summary.get("unknown_rate")),
+            settings=settings,
+            warn_drop_abs=coverage_drift_warn_drop,
+            fail_match_rate=(
+                coverage_drift_fail_match
+                if coverage_drift_fail_match is not None
+                else overlay_min_match_rate_fail
+            ),
+        )
+        if coverage_drift.get("coverage_drift_status") == "DRIFT_FAIL":
+            drift_flags = [str(x) for x in (drift.get("flags") or [])]
+            for flag in coverage_drift.get("flags", []):
+                if str(flag) not in drift_flags:
+                    drift_flags.append(str(flag))
+            drift["flags"] = drift_flags
+            drift["drift_status"] = "DRIFT_FAIL"
+        elif coverage_drift.get("coverage_drift_status") == "DRIFT_WARN" and drift.get("drift_status") == "OK":
+            drift_flags = [str(x) for x in (drift.get("flags") or [])]
+            for flag in coverage_drift.get("flags", []):
+                if str(flag) not in drift_flags:
+                    drift_flags.append(str(flag))
+            drift["flags"] = drift_flags
+            drift["drift_status"] = "DRIFT_WARN"
+        drift["coverage_drift_status"] = coverage_drift.get("coverage_drift_status")
 
         write_markdown_atomically(str(bt_result.output_dir) + "\n", candidate_dir / "backtest_run_dir.txt")
         write_markdown_atomically(str(bt_result.summary_path) + "\n", candidate_dir / "backtest_summary_path.txt")
         write_json_atomically(_finite_json(backtest_summary), candidate_dir / "backtest_summary.json")
         write_json_atomically(_finite_json(drift), candidate_dir / "drift_metrics.json")
+        write_json_atomically(_finite_json(coverage_drift), candidate_dir / "coverage_drift_metrics.json")
 
         micro_grid_dir: Path | None = None
         if micro_enabled:
@@ -404,6 +547,14 @@ def run_candidate_rerun_pack(
                 candidate=candidate,
                 input_file=input_file,
                 validation_run_dir=validation_run_dir,
+                overlay_coverage_mode=coverage_mode_effective,
+                overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+                overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+                overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+                overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+                overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+                overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+                overlay_coverage_bypass=overlay_coverage_bypass,
             )
             micro_dims = _micro_dimensions(candidate, settings)
             micro_result = run_backtest_grid(
@@ -450,6 +601,14 @@ def run_candidate_rerun_pack(
                     else None,
                     overlay_mode=str(overlay.get("mode", "none")),  # type: ignore[arg-type]
                     overlay_join_keys=["ticker", "trade_date"],
+                    overlay_coverage_mode=cast(str, coverage_mode_effective),
+                    overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+                    overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+                    overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+                    overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+                    overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+                    overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+                    overlay_coverage_bypass=overlay_coverage_bypass,
                     train_ends=None,
                     train_start=None,
                     train_end_final=None,
@@ -526,6 +685,13 @@ def run_candidate_rerun_pack(
             "expected_overlay_match_rate": _safe_float(expected_enriched.get("overlay_match_rate")),
             "observed_overlay_match_rate": _safe_float(observed.get("overlay_match_rate")),
             "delta_overlay_match_rate_abs": _safe_float(drift.get("delta_overlay_match_rate_abs")),
+            "expected_overlay_unknown_rate": _safe_float((overlay or {}).get("unknown_rate")),
+            "observed_overlay_unknown_rate": _safe_float(coverage_drift.get("observed_unknown_rate")),
+            "coverage_match_rate_drop_abs": _safe_float(coverage_drift.get("match_rate_drop_abs")),
+            "coverage_unknown_rate_increase_abs": _safe_float(
+                coverage_drift.get("unknown_rate_increase_abs")
+            ),
+            "coverage_drift_status": coverage_drift.get("coverage_drift_status"),
             "drift_status": drift.get("drift_status"),
             "drift_reasons": ",".join(str(v) for v in (drift.get("flags") or [])),
         }
@@ -539,6 +705,7 @@ def run_candidate_rerun_pack(
                 "backtest_summary_path": str(bt_result.summary_path),
                 "trades_path": str(bt_result.trades_path),
                 "candidate_dir": str(candidate_dir),
+                "coverage_drift_metrics_path": str(candidate_dir / "coverage_drift_metrics.json"),
                 "micro_grid_dir": str(micro_grid_dir) if micro_grid_dir is not None else None,
                 "wf_grid_dir": str(wf_grid_dir) if wf_grid_dir is not None else None,
                 "drift_status": drift.get("drift_status"),
@@ -678,6 +845,29 @@ def summarize_candidate_rerun_pack(rerun_dir: Path) -> dict[str, Any]:
             errors.append(f"missing_backtest_summary: {summary_path_item}")
         if not run_dir_item.exists():
             errors.append(f"missing_backtest_run_dir: {run_dir_item}")
+        coverage_drift_path = Path(str(item.get("coverage_drift_metrics_path", "")))
+        if coverage_drift_path.as_posix() != "." and not coverage_drift_path.exists():
+            errors.append(f"missing_coverage_drift_metrics: {coverage_drift_path}")
+        if coverage_drift_path.exists():
+            payload = _read_json(coverage_drift_path)
+            for metric in [
+                "baseline_match_rate",
+                "observed_match_rate",
+                "match_rate_drop_abs",
+                "baseline_unknown_rate",
+                "observed_unknown_rate",
+                "unknown_rate_increase_abs",
+            ]:
+                value = payload.get(metric)
+                if value is not None and (not isinstance(value, (int, float)) or not np.isfinite(float(value))):
+                    errors.append(f"non_finite_coverage_metric:{coverage_drift_path.name}:{metric}")
+            for metric in ["observed_match_rate", "observed_unknown_rate"]:
+                value = payload.get(metric)
+                if value is None:
+                    continue
+                value_f = float(value)
+                if value_f < 0 or value_f > 1:
+                    errors.append(f"coverage_metric_out_of_range:{coverage_drift_path.name}:{metric}")
 
     return {
         "rerun_dir": str(rerun_dir),

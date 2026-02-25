@@ -10,11 +10,20 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from mf_etl.backtest.policy_overlay_models import OverlayMode, PolicyOverlayResult
+from mf_etl.backtest.policy_overlay_models import (
+    OverlayCoverageMode,
+    OverlayMode,
+    OverlayUnknownHandling,
+    PolicyOverlayResult,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 _ALLOWED_KEYS = {"ticker", "trade_date", "trade_dt", "timeframe"}
+
+
+class OverlayCoveragePolicyError(ValueError):
+    """Raised when strict overlay coverage policy fails."""
 
 
 def _read_table(path: Path) -> pl.DataFrame:
@@ -123,8 +132,9 @@ def _load_policy_table(cluster_hardening_dir: Path) -> pl.DataFrame:
     )
 
 
-def _overlay_pass_expr(*, mode: OverlayMode, allow_unknown_for_block_veto: bool) -> pl.Expr:
+def _overlay_pass_expr(*, mode: OverlayMode, unknown_handling: OverlayUnknownHandling) -> pl.Expr:
     cls = pl.col("overlay_policy_class")
+    allow_unknown = unknown_handling == "treat_unknown_as_pass"
     if mode == "none":
         return pl.lit(True)
     if mode == "allow_only":
@@ -132,12 +142,70 @@ def _overlay_pass_expr(*, mode: OverlayMode, allow_unknown_for_block_veto: bool)
     if mode == "allow_watch":
         return cls.is_in(["ALLOW", "WATCH"])
     if mode == "allow_or_unknown":
-        return cls.is_in(["ALLOW", "UNKNOWN"])
+        return cls.is_in(["ALLOW", "UNKNOWN"]) if allow_unknown else (cls == "ALLOW")
 
     # block_veto
-    if allow_unknown_for_block_veto:
+    if allow_unknown:
         return cls != "BLOCK"
     return (~cls.is_in(["BLOCK", "UNKNOWN"]))
+
+
+def _coverage_status_from_metrics(
+    *,
+    match_rate: float | None,
+    unknown_rate: float | None,
+    year_min_match_rate: float | None,
+    duplicate_key_count_primary: int,
+    duplicate_key_count_overlay: int,
+    min_match_rate_warn: float,
+    min_match_rate_fail: float,
+    min_year_match_rate_warn: float,
+    min_year_match_rate_fail: float,
+    unknown_rate_warn: float,
+    unknown_rate_fail: float,
+) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    if duplicate_key_count_primary > 0 or duplicate_key_count_overlay > 0:
+        reasons.append(
+            f"duplicate_keys primary={duplicate_key_count_primary} overlay={duplicate_key_count_overlay}"
+        )
+        return "FAIL_DUPLICATES", reasons
+
+    if match_rate is not None and match_rate < min_match_rate_fail:
+        reasons.append(
+            f"match_rate_below_fail threshold={min_match_rate_fail:.4f} value={match_rate:.4f}"
+        )
+    if year_min_match_rate is not None and year_min_match_rate < min_year_match_rate_fail:
+        reasons.append(
+            f"year_min_match_rate_below_fail threshold={min_year_match_rate_fail:.4f} value={year_min_match_rate:.4f}"
+        )
+    if reasons:
+        return "FAIL_LOW_MATCH", reasons
+
+    if unknown_rate is not None and unknown_rate > unknown_rate_fail:
+        reasons.append(
+            f"unknown_rate_above_fail threshold={unknown_rate_fail:.4f} value={unknown_rate:.4f}"
+        )
+        return "FAIL_HIGH_UNKNOWN", reasons
+
+    if match_rate is not None and match_rate < min_match_rate_warn:
+        reasons.append(
+            f"match_rate_below_warn threshold={min_match_rate_warn:.4f} value={match_rate:.4f}"
+        )
+    if year_min_match_rate is not None and year_min_match_rate < min_year_match_rate_warn:
+        reasons.append(
+            f"year_min_match_rate_below_warn threshold={min_year_match_rate_warn:.4f} value={year_min_match_rate:.4f}"
+        )
+    if reasons:
+        return "WARN_LOW_MATCH", reasons
+
+    if unknown_rate is not None and unknown_rate > unknown_rate_warn:
+        reasons.append(
+            f"unknown_rate_above_warn threshold={unknown_rate_warn:.4f} value={unknown_rate:.4f}"
+        )
+        return "WARN_HIGH_UNKNOWN", reasons
+
+    return "OK", reasons
 
 
 def apply_policy_overlay(
@@ -147,8 +215,14 @@ def apply_policy_overlay(
     overlay_cluster_hardening_dir: Path,
     overlay_mode: OverlayMode,
     join_keys: list[str],
-    allow_unknown_for_block_veto: bool,
-    min_overlay_match_rate_warn: float,
+    unknown_handling: OverlayUnknownHandling,
+    min_match_rate_warn: float,
+    min_match_rate_fail: float,
+    min_year_match_rate_warn: float,
+    min_year_match_rate_fail: float,
+    unknown_rate_warn: float,
+    unknown_rate_fail: float,
+    coverage_mode: OverlayCoverageMode,
     logger: logging.Logger | None = None,
 ) -> PolicyOverlayResult:
     """Attach cluster hardening policy to primary rows and compute gating columns."""
@@ -190,9 +264,46 @@ def apply_policy_overlay(
                 "overlay_watch_rate": None,
                 "overlay_block_rate": None,
                 "overlay_unknown_rate": None,
-                "allow_unknown_for_block_veto": allow_unknown_for_block_veto,
+                "unknown_rate": None,
+                "unknown_handling": unknown_handling,
+                "year_min_match_rate": None,
+                "year_p10_match_rate": None,
+                "year_fail_years": [],
+                "coverage_status": "OK",
             },
-            coverage_by_year=pl.DataFrame(schema={"year": pl.Int32}),
+            coverage_verdict={
+                "coverage_mode": coverage_mode,
+                "thresholds": {
+                    "min_match_rate_warn": min_match_rate_warn,
+                    "min_match_rate_fail": min_match_rate_fail,
+                    "min_year_match_rate_warn": min_year_match_rate_warn,
+                    "min_year_match_rate_fail": min_year_match_rate_fail,
+                    "unknown_rate_warn": unknown_rate_warn,
+                    "unknown_rate_fail": unknown_rate_fail,
+                },
+                "summary": {
+                    "match_rate": None,
+                    "unknown_rate": None,
+                    "year_min_match_rate": None,
+                    "year_p10_match_rate": None,
+                    "year_fail_years": [],
+                },
+                "status": "OK",
+                "reasons": [],
+                "strict_fail_triggered": False,
+                "unknown_handling": unknown_handling,
+            },
+            coverage_by_year=pl.DataFrame(
+                schema={
+                    "year": pl.Int32,
+                    "primary_rows": pl.Int64,
+                    "matched_rows": pl.Int64,
+                    "unmatched_rows": pl.Int64,
+                    "unknown_rows": pl.Int64,
+                    "match_rate": pl.Float64,
+                    "unknown_rate": pl.Float64,
+                }
+            ),
             duplicate_keys=pl.DataFrame(schema={"dataset": pl.String}),
             policy_mix_on_primary=pl.DataFrame(schema={"overlay_policy_class": pl.String}),
         )
@@ -231,7 +342,7 @@ def apply_policy_overlay(
         .otherwise(pl.lit("MATCHED"))
         .alias("overlay_join_status"),
         pl.lit(overlay_mode).alias("overlay_mode"),
-        _overlay_pass_expr(mode=overlay_mode, allow_unknown_for_block_veto=allow_unknown_for_block_veto).alias(
+        _overlay_pass_expr(mode=overlay_mode, unknown_handling=unknown_handling).alias(
             "overlay_allow_signal"
         ),
         pl.lit(True).alias("overlay_enabled"),
@@ -244,14 +355,6 @@ def apply_policy_overlay(
 
     if overlay_mode != "none" and (match_rate is None or match_rate <= 0.0):
         raise ValueError("Overlay mode requires non-zero join coverage, but overlay match_rate is 0.")
-
-    if match_rate is not None and match_rate < float(min_overlay_match_rate_warn):
-        effective_logger.warning(
-            "backtest.overlay.low_match_rate mode=%s match_rate=%.4f threshold=%.4f",
-            overlay_mode,
-            match_rate,
-            float(min_overlay_match_rate_warn),
-        )
 
     overlay_rows_used = int(
         joined.filter(pl.col("overlay_join_status") == "MATCHED").select(keys).unique().height
@@ -277,9 +380,11 @@ def apply_policy_overlay(
             pl.len().alias("primary_rows"),
             (pl.col("overlay_join_status") == "MATCHED").cast(pl.Int64).sum().alias("matched_rows"),
             (pl.col("overlay_join_status") == "UNMATCHED_PRIMARY").cast(pl.Int64).sum().alias("unmatched_rows"),
+            (pl.col("overlay_policy_class") == "UNKNOWN").cast(pl.Int64).sum().alias("unknown_rows"),
         )
         .with_columns(
             (pl.col("matched_rows") / pl.col("primary_rows").cast(pl.Float64)).alias("match_rate"),
+            (pl.col("unknown_rows") / pl.col("primary_rows").cast(pl.Float64)).alias("unknown_rate"),
         )
         .sort("year")
     )
@@ -287,6 +392,64 @@ def apply_policy_overlay(
     duplicates = (
         pl.concat([primary_dup, overlay_dup], how="vertical") if (primary_dup.height > 0 or overlay_dup.height > 0) else pl.DataFrame(schema={"dataset": pl.String})
     )
+
+    year_min_match_rate = (
+        _safe_float(coverage_by_year.select(pl.col("match_rate").cast(pl.Float64, strict=False).min()).item())
+        if coverage_by_year.height > 0
+        else None
+    )
+    year_p10_match_rate = (
+        _safe_float(
+            coverage_by_year.select(
+                pl.col("match_rate").cast(pl.Float64, strict=False).quantile(0.10)
+            ).item()
+        )
+        if coverage_by_year.height > 0
+        else None
+    )
+    year_fail_years = (
+        coverage_by_year.filter(
+            pl.col("match_rate").cast(pl.Float64, strict=False) < float(min_year_match_rate_fail)
+        )
+        .get_column("year")
+        .cast(pl.Int64, strict=False)
+        .drop_nulls()
+        .to_list()
+        if coverage_by_year.height > 0
+        else []
+    )
+
+    duplicate_key_count_primary = (
+        int(primary_dup.select(pl.col("duplicate_count").sum()).item() or 0) if primary_dup.height > 0 else 0
+    )
+    duplicate_key_count_overlay = (
+        int(overlay_dup.select(pl.col("duplicate_count").sum()).item() or 0) if overlay_dup.height > 0 else 0
+    )
+    unknown_rate = _safe_float((unknown_rows / primary_rows_total) if primary_rows_total > 0 else None)
+    coverage_status, coverage_reasons = _coverage_status_from_metrics(
+        match_rate=match_rate,
+        unknown_rate=unknown_rate,
+        year_min_match_rate=year_min_match_rate,
+        duplicate_key_count_primary=duplicate_key_count_primary,
+        duplicate_key_count_overlay=duplicate_key_count_overlay,
+        min_match_rate_warn=float(min_match_rate_warn),
+        min_match_rate_fail=float(min_match_rate_fail),
+        min_year_match_rate_warn=float(min_year_match_rate_warn),
+        min_year_match_rate_fail=float(min_year_match_rate_fail),
+        unknown_rate_warn=float(unknown_rate_warn),
+        unknown_rate_fail=float(unknown_rate_fail),
+    )
+    strict_fail_triggered = bool(coverage_mode == "strict_fail" and coverage_status.startswith("FAIL"))
+
+    if coverage_status.startswith("WARN"):
+        effective_logger.warning(
+            "backtest.overlay.coverage_warn mode=%s status=%s match_rate=%s unknown_rate=%s reasons=%s",
+            overlay_mode,
+            coverage_status,
+            match_rate,
+            unknown_rate,
+            ";".join(coverage_reasons),
+        )
 
     join_summary = {
         "overlay_enabled": True,
@@ -298,23 +461,57 @@ def apply_policy_overlay(
         "match_rate": match_rate,
         "overlay_rows_total": overlay_rows_total,
         "overlay_rows_used": overlay_rows_used,
-        "duplicate_key_count_primary": int(primary_dup.select(pl.col("duplicate_count").sum()).item() or 0)
-        if primary_dup.height > 0
-        else 0,
-        "duplicate_key_count_overlay": int(overlay_dup.select(pl.col("duplicate_count").sum()).item() or 0)
-        if overlay_dup.height > 0
-        else 0,
+        "duplicate_key_count_primary": duplicate_key_count_primary,
+        "duplicate_key_count_overlay": duplicate_key_count_overlay,
         "overlay_allow_rate": _safe_float((allow_rows / primary_rows_total) if primary_rows_total > 0 else None),
         "overlay_watch_rate": _safe_float((watch_rows / primary_rows_total) if primary_rows_total > 0 else None),
         "overlay_block_rate": _safe_float((block_rows / primary_rows_total) if primary_rows_total > 0 else None),
-        "overlay_unknown_rate": _safe_float((unknown_rows / primary_rows_total) if primary_rows_total > 0 else None),
-        "allow_unknown_for_block_veto": allow_unknown_for_block_veto,
-        "min_overlay_match_rate_warn": float(min_overlay_match_rate_warn),
+        "overlay_unknown_rate": unknown_rate,
+        "unknown_rate": unknown_rate,
+        "unknown_handling": unknown_handling,
+        "year_min_match_rate": year_min_match_rate,
+        "year_p10_match_rate": year_p10_match_rate,
+        "year_fail_years": year_fail_years,
+        "coverage_status": coverage_status,
+        "coverage_reasons": coverage_reasons,
+        "coverage_mode": coverage_mode,
+        "min_match_rate_warn": float(min_match_rate_warn),
+        "min_match_rate_fail": float(min_match_rate_fail),
+        "min_year_match_rate_warn": float(min_year_match_rate_warn),
+        "min_year_match_rate_fail": float(min_year_match_rate_fail),
+        "unknown_rate_warn": float(unknown_rate_warn),
+        "unknown_rate_fail": float(unknown_rate_fail),
+    }
+
+    coverage_verdict: dict[str, Any] = {
+        "coverage_mode": coverage_mode,
+        "unknown_handling": unknown_handling,
+        "thresholds": {
+            "min_match_rate_warn": float(min_match_rate_warn),
+            "min_match_rate_fail": float(min_match_rate_fail),
+            "min_year_match_rate_warn": float(min_year_match_rate_warn),
+            "min_year_match_rate_fail": float(min_year_match_rate_fail),
+            "unknown_rate_warn": float(unknown_rate_warn),
+            "unknown_rate_fail": float(unknown_rate_fail),
+        },
+        "summary": {
+            "match_rate": match_rate,
+            "unknown_rate": unknown_rate,
+            "year_min_match_rate": year_min_match_rate,
+            "year_p10_match_rate": year_p10_match_rate,
+            "year_fail_years": year_fail_years,
+            "duplicate_key_count_primary": duplicate_key_count_primary,
+            "duplicate_key_count_overlay": duplicate_key_count_overlay,
+        },
+        "status": coverage_status,
+        "reasons": coverage_reasons,
+        "strict_fail_triggered": strict_fail_triggered,
     }
 
     return PolicyOverlayResult(
         frame=joined,
         join_summary=join_summary,
+        coverage_verdict=coverage_verdict,
         coverage_by_year=coverage_by_year,
         duplicate_keys=duplicates,
         policy_mix_on_primary=policy_mix,

@@ -6,7 +6,7 @@ import json
 import logging
 from pathlib import Path
 import traceback
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import numpy as np
@@ -387,8 +387,14 @@ def _to_manifest_row(
             or (source_spec.overlay_cluster_file is not None and source_spec.overlay_cluster_hardening_dir is not None)
         ),
         "overlay_mode": str(overlay.get("overlay_mode") or source_spec.overlay_mode),
+        "overlay_coverage_mode": str(
+            overlay.get("overlay_coverage_mode") or source_spec.overlay_coverage_mode
+        ),
         "overlay_match_rate": _safe_float(overlay.get("overlay_match_rate")),
         "overlay_unknown_rate": _safe_float(overlay.get("overlay_unknown_rate")),
+        "overlay_year_min_match_rate": _safe_float(overlay.get("overlay_year_min_match_rate")),
+        "overlay_year_p10_match_rate": _safe_float(overlay.get("overlay_year_p10_match_rate")),
+        "overlay_coverage_status": overlay.get("overlay_coverage_status"),
         "overlay_allow_rate": _safe_float(overlay.get("overlay_allow_rate")),
         "overlay_watch_rate": _safe_float(overlay.get("overlay_watch_rate")),
         "overlay_block_rate": _safe_float(overlay.get("overlay_block_rate")),
@@ -474,6 +480,14 @@ def _ensure_cluster_hardening_dir(
         overlay_cluster_hardening_dir=source_spec.overlay_cluster_hardening_dir,
         overlay_mode=source_spec.overlay_mode,
         overlay_join_keys=source_spec.overlay_join_keys,
+        overlay_coverage_mode=source_spec.overlay_coverage_mode,
+        overlay_min_match_rate_warn=source_spec.overlay_min_match_rate_warn,
+        overlay_min_match_rate_fail=source_spec.overlay_min_match_rate_fail,
+        overlay_min_year_match_rate_warn=source_spec.overlay_min_year_match_rate_warn,
+        overlay_min_year_match_rate_fail=source_spec.overlay_min_year_match_rate_fail,
+        overlay_unknown_rate_warn=source_spec.overlay_unknown_rate_warn,
+        overlay_unknown_rate_fail=source_spec.overlay_unknown_rate_fail,
+        overlay_coverage_bypass=source_spec.overlay_coverage_bypass,
     )
 
 
@@ -585,6 +599,14 @@ def run_backtest_grid(
                     overlay_cluster_hardening_dir=actual_spec.overlay_cluster_hardening_dir,
                     overlay_mode=actual_spec.overlay_mode,
                     overlay_join_keys=actual_spec.overlay_join_keys,
+                    overlay_coverage_mode=actual_spec.overlay_coverage_mode,
+                    overlay_min_match_rate_warn=actual_spec.overlay_min_match_rate_warn,
+                    overlay_min_match_rate_fail=actual_spec.overlay_min_match_rate_fail,
+                    overlay_min_year_match_rate_warn=actual_spec.overlay_min_year_match_rate_warn,
+                    overlay_min_year_match_rate_fail=actual_spec.overlay_min_year_match_rate_fail,
+                    overlay_unknown_rate_warn=actual_spec.overlay_unknown_rate_warn,
+                    overlay_unknown_rate_fail=actual_spec.overlay_unknown_rate_fail,
+                    overlay_coverage_bypass=actual_spec.overlay_coverage_bypass,
                     execution_profile=execution_profile,  # type: ignore[arg-type]
                     exec_min_price=exec_min_price,
                     exec_min_dollar_vol20=exec_min_dollar_vol20,
@@ -704,6 +726,18 @@ def run_backtest_grid(
     successful = int(manifest.filter(pl.col("status") == "SUCCESS").height) if manifest.height > 0 else 0
     failed = int(manifest.filter(pl.col("status") == "FAILED").height) if manifest.height > 0 else 0
     skipped = int(manifest.filter(pl.col("status") == "SKIPPED").height) if manifest.height > 0 else 0
+    overlay_coverage_failures = (
+        int(
+            manifest.filter(
+                (pl.col("status") == "FAILED")
+                & pl.col("error_message")
+                .cast(pl.String, strict=False)
+                .str.contains("overlay_coverage_strict_fail", literal=False)
+            ).height
+        )
+        if manifest.height > 0 and "error_message" in manifest.columns
+        else 0
+    )
     zero_trade_combos = (
         int(metrics_table.filter(pl.col("is_zero_trade_combo") == True).height) if metrics_table.height > 0 else 0
     )
@@ -745,6 +779,7 @@ def run_backtest_grid(
         "successful_combos": successful,
         "failed_combos": failed,
         "skipped_combos": skipped,
+        "overlay_coverage_failures": overlay_coverage_failures,
         "zero_trade_combos": zero_trade_combos,
         "zero_trade_combo_share": _safe_float((zero_trade_combos / successful) if successful > 0 else None),
         "realism_profile_broken_for_universe": realism_profile_broken_for_universe,
@@ -763,6 +798,14 @@ def run_backtest_grid(
                 ),
                 "overlay_mode": spec.overlay_mode,
                 "overlay_join_keys": spec.overlay_join_keys,
+                "overlay_coverage_mode": spec.overlay_coverage_mode,
+                "overlay_min_match_rate_warn": spec.overlay_min_match_rate_warn,
+                "overlay_min_match_rate_fail": spec.overlay_min_match_rate_fail,
+                "overlay_min_year_match_rate_warn": spec.overlay_min_year_match_rate_warn,
+                "overlay_min_year_match_rate_fail": spec.overlay_min_year_match_rate_fail,
+                "overlay_unknown_rate_warn": spec.overlay_unknown_rate_warn,
+                "overlay_unknown_rate_fail": spec.overlay_unknown_rate_fail,
+                "overlay_coverage_bypass": bool(spec.overlay_coverage_bypass),
             }
             for spec in resolved_source_specs.values()
         ],
@@ -1220,6 +1263,14 @@ def run_backtest_grid_walkforward(
     overlay_cluster_hardening_dir: Path | None,
     overlay_mode: OverlayMode,
     overlay_join_keys: list[str] | None,
+    overlay_coverage_mode: str,
+    overlay_min_match_rate_warn: float | None,
+    overlay_min_match_rate_fail: float | None,
+    overlay_min_year_match_rate_warn: float | None,
+    overlay_min_year_match_rate_fail: float | None,
+    overlay_unknown_rate_warn: float | None,
+    overlay_unknown_rate_fail: float | None,
+    overlay_coverage_bypass: bool,
     train_ends: list[str] | None,
     train_start: str | None,
     train_end_final: str | None,
@@ -1337,6 +1388,14 @@ def run_backtest_grid_walkforward(
                     overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
                     overlay_mode=overlay_mode,
                     overlay_join_keys=overlay_join_keys,
+                    overlay_coverage_mode=cast(str, overlay_coverage_mode),
+                    overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+                    overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+                    overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+                    overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+                    overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+                    overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+                    overlay_coverage_bypass=overlay_coverage_bypass,
                 )
             )
         if "flow" in source_set:
@@ -1350,6 +1409,14 @@ def run_backtest_grid_walkforward(
                     overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
                     overlay_mode=overlay_mode,
                     overlay_join_keys=overlay_join_keys,
+                    overlay_coverage_mode=cast(str, overlay_coverage_mode),
+                    overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+                    overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+                    overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+                    overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+                    overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+                    overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+                    overlay_coverage_bypass=overlay_coverage_bypass,
                 )
             )
         if "cluster" in source_set:
@@ -1364,6 +1431,14 @@ def run_backtest_grid_walkforward(
                     overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
                     overlay_mode=overlay_mode,
                     overlay_join_keys=overlay_join_keys,
+                    overlay_coverage_mode=cast(str, overlay_coverage_mode),
+                    overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+                    overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+                    overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+                    overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+                    overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+                    overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+                    overlay_coverage_bypass=overlay_coverage_bypass,
                 )
             )
 
@@ -1396,10 +1471,29 @@ def run_backtest_grid_walkforward(
                 grid_run_id_override=f"{wf_grid_id}-{train_end}",
             )
             split_summary = _load_json(split_result.summary_path)
+            split_status = "SUCCESS"
+            split_error: str | None = None
+            if (
+                str(overlay_coverage_mode) == "strict_fail"
+                and int(split_summary.get("successful_combos", 0) or 0) <= 0
+                and int(split_summary.get("overlay_coverage_failures", 0) or 0) > 0
+            ):
+                split_status = "FAILED"
+                split_error = (
+                    "overlay_coverage_strict_fail_all_combos:"
+                    f"overlay_coverage_failures={split_summary.get('overlay_coverage_failures')}"
+                )
+                failures.append(
+                    {
+                        "train_end": train_end,
+                        "error": split_error,
+                        "traceback": None,
+                    }
+                )
             split_rows.append(
                 {
                     "train_end": train_end,
-                    "status": "SUCCESS",
+                    "status": split_status,
                     "grid_run_dir": str(split_result.output_dir),
                     "successful_combos": split_summary.get("successful_combos"),
                     "failed_combos": split_summary.get("failed_combos"),
@@ -1408,7 +1502,7 @@ def run_backtest_grid_walkforward(
                     "robustness_score_v2_mean": None,
                     "exec_eligibility_rate_mean": None,
                     "exec_suppressed_signal_share_mean": None,
-                    "error": None,
+                    "error": split_error,
                 }
             )
             metrics_df = pl.read_parquet(split_result.metrics_table_path)
@@ -1670,6 +1764,8 @@ def run_backtest_grid_walkforward(
                 .agg(
                     pl.col("overlay_enabled").cast(pl.Float64, strict=False).mean().alias("overlay_enabled_share"),
                     pl.col("overlay_mode").drop_nulls().first().alias("overlay_mode"),
+                    pl.col("overlay_coverage_mode").drop_nulls().first().alias("overlay_coverage_mode"),
+                    pl.col("overlay_coverage_status").drop_nulls().first().alias("overlay_coverage_status"),
                     pl.col("overlay_match_rate").cast(pl.Float64, strict=False).mean().alias("overlay_match_rate_mean"),
                     pl.col("overlay_unknown_rate").cast(pl.Float64, strict=False).mean().alias("overlay_unknown_rate_mean"),
                     pl.col("overlay_vetoed_signal_share")
@@ -1754,6 +1850,16 @@ def run_backtest_grid_walkforward(
         "policy_filter_mode": policy_filter_mode,
         "overlay_enabled": bool(overlay_cluster_file is not None and overlay_cluster_hardening_dir is not None),
         "overlay_mode": overlay_mode,
+        "overlay_coverage_mode": overlay_coverage_mode,
+        "overlay_coverage_bypass": bool(overlay_coverage_bypass),
+        "overlay_coverage_thresholds": {
+            "min_match_rate_warn": overlay_min_match_rate_warn,
+            "min_match_rate_fail": overlay_min_match_rate_fail,
+            "min_year_match_rate_warn": overlay_min_year_match_rate_warn,
+            "min_year_match_rate_fail": overlay_min_year_match_rate_fail,
+            "unknown_rate_warn": overlay_unknown_rate_warn,
+            "unknown_rate_fail": overlay_unknown_rate_fail,
+        },
         "execution_profile": execution_profile,
         "exec_overrides": {
             "exec_min_price": exec_min_price,

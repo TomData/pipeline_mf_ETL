@@ -745,3 +745,31 @@ PCP outputs:
 - `artifacts/production_candidates/pcp-<id>_production_candidate_pack_v1/production_candidates_table.csv`
 - `artifacts/production_candidates/pcp-<id>_production_candidate_pack_v1/production_candidates_summary.json`
 - `artifacts/production_candidates/pcp-<id>_production_candidate_pack_v1/production_candidate_pack_report.md`
+
+## Candidate Re-run Pack v1
+
+Candidate Re-run Pack (CRP v1) reruns locked PCP candidates and computes drift flags vs expected snapshots.
+
+- run command:
+  - `python -m mf_etl.cli candidate-rerun-run --pcp-pack-dir <PCP_DIR> [--as-of-tag TAG] [--wf-run-dir <WF_DIR>] [--override-input-file <FILE>]`
+- sanity command:
+  - `python -m mf_etl.cli candidate-rerun-sanity --rerun-dir <CRP_DIR>`
+
+CRP behavior:
+
+- reruns each PCP candidate via `backtest-run` using locked params
+- optional micro-grid around locked config (small local sensitivity probe)
+- optional WF single-combo rerun per candidate when `--wf-run-dir` is provided
+- computes deltas and drift status (`OK`, `DRIFT_WARN`, `DRIFT_FAIL`)
+
+CRP outputs:
+
+- `artifacts/candidate_reruns/crp-<id>_candidate_rerun_pack_v1/rerun_manifest.json`
+- `artifacts/candidate_reruns/crp-<id>_candidate_rerun_pack_v1/rerun_candidates_table.csv`
+- `artifacts/candidate_reruns/crp-<id>_candidate_rerun_pack_v1/rerun_summary.json`
+- `artifacts/candidate_reruns/crp-<id>_candidate_rerun_pack_v1/rerun_report.md`
+- per-candidate subdirs:
+  - `candidates/<CANDIDATE>/backtest_run_dir.txt`
+  - `candidates/<CANDIDATE>/backtest_summary.json`
+  - `candidates/<CANDIDATE>/drift_metrics.json`
+  - optional `micro_grid_dir.txt`

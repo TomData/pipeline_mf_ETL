@@ -402,6 +402,36 @@ class BacktestSensitivityConfig(BaseModel):
     )
 
 
+class CandidateRerunDriftThresholdsConfig(BaseModel):
+    """Thresholds for classifying rerun metric drift vs PCP expected snapshots."""
+
+    expectancy_drop_pct_flag: float = Field(default=0.30, ge=0.0)
+    pf_drop_pct_flag: float = Field(default=0.25, ge=0.0)
+    robustness_drop_points_flag: float = Field(default=10.0, ge=0.0)
+    ret_cv_increase_pct_flag: float = Field(default=0.50, ge=0.0)
+    trade_count_drop_pct_flag: float = Field(default=0.40, ge=0.0)
+    exec_eligibility_drop_pct_flag: float = Field(default=0.20, ge=0.0)
+    overlay_match_rate_min: float = Field(default=0.80, ge=0.0, le=1.0)
+
+
+class CandidateRerunMicroGridConfig(BaseModel):
+    """Small local sensitivity probe around locked candidate configuration."""
+
+    enabled_default: bool = False
+    hold_bars_offsets: list[int] = Field(default_factory=lambda: [-5, 0, 10], min_length=1)
+    fee_bps_offsets: list[float] = Field(default_factory=lambda: [0.0, 10.0], min_length=1)
+    max_combos: int = Field(default=9, ge=1)
+
+
+class CandidateRerunConfig(BaseModel):
+    """Candidate rerun orchestration settings."""
+
+    drift: CandidateRerunDriftThresholdsConfig = Field(default_factory=CandidateRerunDriftThresholdsConfig)
+    micro_grid: CandidateRerunMicroGridConfig = Field(default_factory=CandidateRerunMicroGridConfig)
+    wf_run_enable_default: bool = False
+    eps: float = Field(default=1e-12, gt=0.0)
+
+
 class IndicatorsConfig(BaseModel):
     """Indicator-layer parameterization for Silver-derived signals."""
 
@@ -615,6 +645,7 @@ class AppSettings(BaseSettings):
         default_factory=BacktestExecutionCalibrationConfig
     )
     backtest_sensitivity: BacktestSensitivityConfig = Field(default_factory=BacktestSensitivityConfig)
+    candidate_rerun: CandidateRerunConfig = Field(default_factory=CandidateRerunConfig)
     research_clustering: ResearchClusteringConfig = Field(default_factory=ResearchClusteringConfig)
     research_hmm: ResearchHMMConfig = Field(default_factory=ResearchHMMConfig)
 

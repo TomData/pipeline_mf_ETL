@@ -79,6 +79,10 @@ from mf_etl.backtest.production_candidates import (
     run_production_candidates_build,
     summarize_production_candidates_pack,
 )
+from mf_etl.backtest.candidate_rerun import (
+    run_candidate_rerun_pack,
+    summarize_candidate_rerun_pack,
+)
 from mf_etl.backtest.execution_realism_report import run_execution_realism_report
 from mf_etl.backtest.hybrid_eval_report import run_hybrid_eval_report
 from mf_etl.backtest.sensitivity_runner import (
@@ -5242,6 +5246,134 @@ def production_candidates_sanity(
     for error in errors[:20]:
         typer.echo(f"- {error}")
     typer.echo(f"policy_path: {summary.get('policy_path')}")
+    typer.echo(f"table_path: {summary.get('table_path')}")
+    typer.echo(f"summary_path: {summary.get('summary_path')}")
+    typer.echo(f"report_path: {summary.get('report_path')}")
+    if errors:
+        raise typer.Exit(code=1)
+
+
+@app.command("candidate-rerun-run")
+def candidate_rerun_run(
+    pcp_pack_dir: Path = typer.Option(
+        ...,
+        "--pcp-pack-dir",
+        help="PCP pack directory containing production_policy_packet_v1.json.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    wf_run_dir: Path | None = typer.Option(
+        None,
+        "--wf-run-dir",
+        help="Optional validation walk-forward run directory for single-combo WF reruns.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    as_of_tag: str | None = typer.Option(
+        None,
+        "--as-of-tag",
+        help="Optional label for rerun manifest/report.",
+    ),
+    override_input_file: Path | None = typer.Option(
+        None,
+        "--override-input-file",
+        help="Optional override input file used for all candidates.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    run_micro_grid: bool | None = typer.Option(
+        None,
+        "--run-micro-grid/--no-run-micro-grid",
+        help="Run small local sensitivity grid around locked config; default from settings.",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run Candidate Re-run Pack v1 from a Production Candidate Pack directory."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = run_candidate_rerun_pack(
+        settings,
+        pcp_pack_dir=pcp_pack_dir,
+        as_of_tag=as_of_tag,
+        wf_run_dir=wf_run_dir,
+        override_input_file=override_input_file,
+        run_micro_grid=run_micro_grid,
+        logger=logger,
+    )
+    table = pl.read_csv(result.candidates_table_path)
+    compact_cols = [
+        col
+        for col in [
+            "candidate_label",
+            "combo_id",
+            "observed_expectancy",
+            "observed_profit_factor",
+            "observed_ret_cv",
+            "observed_trade_count",
+            "drift_status",
+            "drift_reasons",
+        ]
+        if col in table.columns
+    ]
+    compact = table.select(compact_cols).sort("candidate_label") if compact_cols else table.sort("candidate_label")
+
+    typer.echo(f"rerun_id: {result.run_id}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo("candidate_summary:")
+    for row in compact.to_dicts():
+        typer.echo(
+            f"{row.get('candidate_label')}: combo={row.get('combo_id')} "
+            f"exp={row.get('observed_expectancy')} pf={row.get('observed_profit_factor')} "
+            f"ret_cv={row.get('observed_ret_cv')} trades={row.get('observed_trade_count')} "
+            f"status={row.get('drift_status')} reasons={row.get('drift_reasons')}"
+        )
+    typer.echo(f"manifest_path: {result.manifest_path}")
+    typer.echo(f"table_path: {result.candidates_table_path}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"report_path: {result.report_path}")
+
+
+@app.command("candidate-rerun-sanity")
+def candidate_rerun_sanity(
+    rerun_dir: Path = typer.Option(
+        ...,
+        "--rerun-dir",
+        help="Candidate rerun output directory (crp-*_candidate_rerun_pack_v1).",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+) -> None:
+    """Validate CRP artifacts and drift tables."""
+
+    summary = summarize_candidate_rerun_pack(rerun_dir)
+    typer.echo(f"rerun_dir: {summary.get('rerun_dir')}")
+    typer.echo(f"candidate_count: {summary.get('candidate_count')}")
+    typer.echo(f"non_finite_cells: {summary.get('non_finite_cells')}")
+    warnings = summary.get("warnings", [])
+    errors = summary.get("errors", [])
+    typer.echo(f"warnings: {len(warnings)}")
+    for warning in warnings[:20]:
+        typer.echo(f"- {warning}")
+    typer.echo(f"errors: {len(errors)}")
+    for error in errors[:20]:
+        typer.echo(f"- {error}")
+    typer.echo(f"manifest_path: {summary.get('manifest_path')}")
     typer.echo(f"table_path: {summary.get('table_path')}")
     typer.echo(f"summary_path: {summary.get('summary_path')}")
     typer.echo(f"report_path: {summary.get('report_path')}")

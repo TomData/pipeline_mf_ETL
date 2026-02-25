@@ -226,6 +226,23 @@ backtest_sensitivity:
     cost_robustness: 0.10
     hygiene: 0.05
 
+candidate_rerun:
+  drift:
+    expectancy_drop_pct_flag: 0.30
+    pf_drop_pct_flag: 0.25
+    robustness_drop_points_flag: 10.0
+    ret_cv_increase_pct_flag: 0.50
+    trade_count_drop_pct_flag: 0.40
+    exec_eligibility_drop_pct_flag: 0.20
+    overlay_match_rate_min: 0.80
+  micro_grid:
+    enabled_default: false
+    hold_bars_offsets: [-5, 0, 10]
+    fee_bps_offsets: [0.0, 10.0]
+    max_combos: 9
+  wf_run_enable_default: false
+  eps: 1.0e-12
+
 research_clustering:
   default_feature_list:
     - tmf_21

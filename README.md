@@ -349,3 +349,230 @@ Primary artifacts (per run):
 - `artifacts/validation_runs/<run_id>_<input_type>_<state_tag>/validation_scorecard.json`
 
 Forward-outcome aggregation is finite-only: non-finite values are normalized to null before aggregation, and QA guards enforce consistency for counts vs mean/median outputs.
+
+## Validation Walk-Forward + Cluster QA
+
+For higher statistical power, run multi-split OOS validation and aggregate results:
+
+- `python -m mf_etl.cli validation-wf-run --dataset /abs/path/to/dataset.parquet`
+- `python -m mf_etl.cli validation-wf-run --dataset /abs/path/to/dataset.parquet --train-end-list 2014-12-31,2016-12-31,2018-12-31,2020-12-31 --bootstrap-mode block --block-length 10 --min-events-per-transition 10`
+- `python -m mf_etl.cli validation-wf-sanity --wf-run-dir /abs/path/to/artifacts/validation_walkforward/<wf_run_id>`
+
+Walk-forward artifacts:
+
+- `artifacts/validation_walkforward/<wf_run_id>/wf_manifest.json`
+- `artifacts/validation_walkforward/<wf_run_id>/wf_split_runs.csv`
+- `artifacts/validation_walkforward/<wf_run_id>/wf_model_summary_long.csv`
+- `artifacts/validation_walkforward/<wf_run_id>/wf_model_summary_wide.csv`
+- `artifacts/validation_walkforward/<wf_run_id>/wf_comparison_summary.csv`
+- `artifacts/validation_walkforward/<wf_run_id>/wf_aggregate_summary.json`
+- `artifacts/validation_walkforward/<wf_run_id>/wf_full_report.md`
+
+For unstable cluster diagnostics (for example very high `ret_cv`), run:
+
+- `python -m mf_etl.cli cluster-qa-run --validation-run-dir /abs/path/to/artifacts/validation_runs/<cluster_validation_run>`
+- `python -m mf_etl.cli cluster-qa-run --wf-run-dir /abs/path/to/artifacts/validation_walkforward/<wf_run_id>`
+
+Cluster QA artifacts:
+
+- single-run: `cluster_qa_summary.json`, `cluster_qa_flagged_states.csv`, `cluster_qa_state_windows.csv`, `cluster_qa_report.md`
+- walk-forward: `cluster_qa_wf_summary.json`, `cluster_qa_wf_flagged_states.csv`, `cluster_qa_issue_frequency.csv`, `cluster_qa_wf_report.md`
+
+## Cluster Hardening & Tradable-State Filter v1
+
+Cluster hardening turns cluster validation outputs into deterministic state policies:
+
+- class labels per state: `ALLOW`, `WATCH`, `BLOCK`
+- explicit reasons and QA-derived penalties
+- optional filtered row exports for tradable-state backtests
+
+Commands:
+
+- single-run policy:
+  - `python -m mf_etl.cli cluster-hardening-run --validation-run-dir /abs/path/to/artifacts/validation_runs/<cluster_validation_dir>`
+- single-run with filtered exports:
+  - `python -m mf_etl.cli cluster-hardening-run --validation-run-dir /abs/path/to/artifacts/validation_runs/<cluster_validation_dir> --clustered-rows-file /abs/path/to/clustered_dataset_full.parquet --export-filtered`
+- walk-forward aggregation:
+  - `python -m mf_etl.cli cluster-hardening-run --wf-run-dir /abs/path/to/artifacts/validation_walkforward/<wf_run_id>`
+- sanity:
+  - `python -m mf_etl.cli cluster-hardening-sanity --hardening-dir /abs/path/to/hardening_dir`
+- compare two policies:
+  - `python -m mf_etl.cli cluster-hardening-compare --hardening-dir-a /abs/path/to/hardening_a --hardening-dir-b /abs/path/to/hardening_b`
+
+Single-run artifacts:
+
+- `cluster_hardening_policy.json`
+- `cluster_hardening_state_table.csv`
+- `cluster_hardening_summary.json`
+- `cluster_hardening_report.md`
+- optional exports under `exports/`:
+  - `clustered_rows_with_policy.parquet`
+  - `clustered_rows_tradable.parquet`
+  - `clustered_rows_watch.parquet`
+  - `cluster_hardening_export_summary.json`
+  - `cluster_hardening_export_by_state.csv`
+
+Walk-forward artifacts:
+
+- `cluster_hardening_wf_summary.json`
+- `cluster_hardening_wf_state_stats.csv`
+- `cluster_hardening_wf_split_counts.csv`
+- `cluster_hardening_wf_issue_frequency.csv`
+- `cluster_hardening_threshold_recommendation.json`
+- `cluster_hardening_wf_report.md`
+
+## Backtest Harness v1
+
+Backtest Harness v1 provides deterministic, execution-oriented research baselines for:
+
+- FLOW (`flow_state_code`)
+- HMM (`hmm_state`)
+- CLUSTER (`cluster_id`, with cluster hardening policy; ALLOW-only by default)
+
+Core assumptions (MVP):
+
+- D1 only
+- EOD signal, next-bar execution
+- no intraday fill modeling
+- no portfolio optimizer
+- no position sizing optimization
+- slippage/fees default to zero unless configured
+
+Commands:
+
+- `python -m mf_etl.cli backtest-run --input-type flow --input-file /abs/path/dataset.parquet`
+- `python -m mf_etl.cli backtest-run --input-type hmm --input-file /abs/path/decoded_rows.parquet --validation-run-dir /abs/path/to/hmm_validation_run`
+- `python -m mf_etl.cli backtest-run --input-type cluster --input-file /abs/path/clustered_dataset_full.parquet --cluster-hardening-dir /abs/path/to/cluster_hardening`
+- `python -m mf_etl.cli backtest-sanity --run-dir /abs/path/to/artifacts/backtest_runs/<run_dir>`
+- `python -m mf_etl.cli backtest-compare --run-dir <run_a> --run-dir <run_b> --run-dir <run_c>`
+- `python -m mf_etl.cli backtest-wf-run --wf-run-dir /abs/path/to/artifacts/validation_walkforward/<wf_run_id> --flow-dataset-file /abs/path/dataset.parquet`
+
+Single-run artifacts:
+
+- `artifacts/backtest_runs/<run_id>_<source>_<tag>/backtest_run_config.json`
+- `artifacts/backtest_runs/<run_id>_<source>_<tag>/backtest_summary.json`
+- `artifacts/backtest_runs/<run_id>_<source>_<tag>/trades.parquet`
+- `artifacts/backtest_runs/<run_id>_<source>_<tag>/summary_by_state.csv`
+- `artifacts/backtest_runs/<run_id>_<source>_<tag>/summary_by_symbol.csv`
+- `artifacts/backtest_runs/<run_id>_<source>_<tag>/signal_diagnostics.json`
+- `artifacts/backtest_runs/<run_id>_<source>_<tag>/backtest_report.md`
+
+Walk-forward artifacts:
+
+- `artifacts/backtest_walkforward/<wf_bt_id>/wf_backtest_manifest.json`
+- `artifacts/backtest_walkforward/<wf_bt_id>/wf_backtest_aggregate_summary.json`
+- `artifacts/backtest_walkforward/<wf_bt_id>/wf_backtest_by_split.csv`
+- `artifacts/backtest_walkforward/<wf_bt_id>/wf_backtest_model_summary.csv`
+- `artifacts/backtest_walkforward/<wf_bt_id>/wf_backtest_report.md`
+
+## Backtest Sensitivity Pack v1
+
+Backtest Sensitivity Pack v1 orchestrates parameter-grid experiments on top of `backtest-run` to test robustness across hold horizon, signal/exit modes, and cost assumptions.
+
+Commands:
+
+- `python -m mf_etl.cli backtest-grid-run --input-type flow --input-file /abs/path/dataset.parquet --hold-bars-grid \"5,10,20\" --fee-bps-grid \"0,10\"`
+- `python -m mf_etl.cli backtest-grid-run --multi-source --flow-input-file /abs/path/dataset.parquet --hmm-input-file /abs/path/decoded_rows.parquet --cluster-input-file /abs/path/clustered_dataset_full.parquet --validation-run-dir /abs/path/hmm_validation --cluster-hardening-dir /abs/path/cluster_hardening`
+- `python -m mf_etl.cli backtest-grid-sanity --grid-run-dir /abs/path/to/artifacts/backtest_sensitivity/<grid_run_dir>`
+- `python -m mf_etl.cli backtest-grid-compare --grid-run-dir <grid_a> --grid-run-dir <grid_b> --grid-run-dir <grid_c>`
+- `python -m mf_etl.cli backtest-grid-wf-run --wf-run-dir /abs/path/to/artifacts/validation_walkforward/<wf_run_id> --flow-dataset-file /abs/path/dataset.parquet`
+
+Grid artifacts:
+
+- `artifacts/backtest_sensitivity/grid-<id>_<scope>_<tag>/grid_run_config.json`
+- `artifacts/backtest_sensitivity/grid-<id>_<scope>_<tag>/grid_manifest.parquet`
+- `artifacts/backtest_sensitivity/grid-<id>_<scope>_<tag>/grid_metrics_table.parquet`
+- `artifacts/backtest_sensitivity/grid-<id>_<scope>_<tag>/grid_dimension_sensitivity.parquet`
+- `artifacts/backtest_sensitivity/grid-<id>_<scope>_<tag>/grid_summary.json`
+- `artifacts/backtest_sensitivity/grid-<id>_<scope>_<tag>/grid_report.md`
+
+Walk-forward grid artifacts:
+
+- `artifacts/backtest_sensitivity_walkforward/wfgrid-<id>/wf_grid_manifest.json`
+- `artifacts/backtest_sensitivity_walkforward/wfgrid-<id>/wf_grid_by_split.parquet`
+- `artifacts/backtest_sensitivity_walkforward/wfgrid-<id>/wf_grid_config_aggregate.parquet`
+- `artifacts/backtest_sensitivity_walkforward/wfgrid-<id>/wf_grid_source_summary.parquet`
+- `artifacts/backtest_sensitivity_walkforward/wfgrid-<id>/wf_grid_report.md`
+
+Robustness score (0-100) is a deterministic heuristic:
+
+- expectancy rank (30%)
+- profit factor rank (20%)
+- drawdown score (20%)
+- consistency via return dispersion (15%)
+- cost robustness (10%)
+- execution hygiene (5%)
+
+This score is for ranking candidate configs and should not be treated as a statistical significance test.
+
+## Backtest Sensitivity Pack v2
+
+v2 extends v1 with:
+
+- cluster policy filter modes:
+  - `allow_only` (default)
+  - `allow_watch`
+  - `all_states`
+- quality-of-edge metrics:
+  - `ret_cv`
+  - `ret_p10`, `ret_p90`
+  - `downside_std`
+  - `worst_trade_return`, `best_trade_return`
+  - `trades_per_1000_rows`
+  - `row_usage_rate` (MVP proxy)
+  - `turnover_proxy` (MVP proxy)
+  - `is_zero_trade_combo`
+- extended robustness scoring:
+  - `robustness_score_v1` and `robustness_score_v2`
+- enriched walk-forward aggregation:
+  - winner stability by metric
+  - config consistency across splits
+  - cost fragility summary
+  - tail-risk summary
+
+Important MVP simplifications:
+
+- `row_usage_rate` is approximated from realized trade count vs eligible rows.
+- `turnover_proxy` is approximated from trade count and average hold bars.
+- These are deterministic research proxies, not exact microstructure turnover/utilization measures.
+
+Examples:
+
+- Cluster grid with policy filter:
+  - `python -m mf_etl.cli backtest-grid-run --input-type cluster --input-file /abs/path/clustered_dataset_full.parquet --cluster-hardening-dir /abs/path/cluster_hardening --policy-filter-mode allow_only --hold-bars-grid "5,10,20" --fee-bps-grid "0,10,25"`
+- WF grid with explicit split list:
+  - `python -m mf_etl.cli backtest-grid-wf-run --wf-run-dir /abs/path/wf-run --flow-dataset-file /abs/path/dataset.parquet --train-ends "2014-12-31,2016-12-31,2018-12-31,2020-12-31" --sources "hmm,flow,cluster" --policy-filter-mode allow_only --hold-bars-grid "5,10,20" --fee-bps-grid "0,10"`
+
+## Hybrid State Overlay v1
+
+Hybrid overlay conditions a primary state engine (HMM/FLOW) with cluster hardening policy classes on aligned `ticker,trade_date` rows.
+
+- overlay modes:
+  - `none`
+  - `allow_only`
+  - `allow_watch`
+  - `block_veto`
+  - `allow_or_unknown`
+- key CLI flags:
+  - `--overlay-cluster-file`
+  - `--overlay-cluster-hardening-dir`
+  - `--overlay-mode`
+  - `--overlay-join-keys` (default: `ticker,trade_date`)
+- commands with overlay support:
+  - `backtest-run`
+  - `backtest-wf-run`
+  - `backtest-grid-run`
+  - `backtest-grid-wf-run`
+
+Overlay artifacts (when enabled):
+
+- `overlay_join_summary.json`
+- `overlay_join_coverage_by_year.csv`
+- `overlay_policy_mix_on_primary.csv`
+- `overlay_signal_effect_summary.json`
+- `overlay_performance_breakdown.csv`
+
+MVP simplifications:
+
+- Duplicate overlay keys are deduped deterministically by first row after key sort (`dedupe_rule=first`).
+- Overlay gating is a hard pass/veto filter only (no weighting/blending of signals yet).

@@ -77,6 +77,114 @@ gold_features:
   export:
     default_drop_null_key_features: true
 
+validation_walkforward:
+  train_end_list_default:
+    - 2012-12-31
+    - 2014-12-31
+    - 2016-12-31
+    - 2018-12-31
+    - 2020-12-31
+  hmm_components_default: 5
+  cluster_method_default: gmm
+  cluster_k_default: 5
+  scaling_scope_default: per_ticker
+  continue_on_error_default: true
+
+cluster_qa:
+  ret_cv_threshold: 5.0
+  min_n_rows: 200
+  min_state_share: 0.03
+  sign_consistency_threshold: 0.55
+  ci_width_quantile_threshold: 0.8
+  eps: 1.0e-12
+
+cluster_hardening:
+  min_n_rows_hard: 200
+  min_state_share_hard: 0.03
+  ret_cv_hard: 6.0
+  sign_consistency_hard: 0.55
+  ci_width_hard_quantile: 0.8
+  score_min_allow: 70.0
+  score_min_watch: 45.0
+  penalties:
+    LOW_N: 20
+    LOW_OCCUPANCY: 20
+    MEAN_NEAR_ZERO_CV_INFLATION: 15
+    WIDE_CI: 15
+    SIGN_FLIP_ACROSS_WINDOWS: 20
+    WINDOW_DRIFT_HIGH: 15
+    LIKELY_OUTLIER_WINDOW: 10
+    TRANSITIONS_TOO_SPARSE: 10
+  weights:
+    sample_size: 0.15
+    occupancy: 0.15
+    sign_confidence: 0.2
+    ci_width: 0.15
+    sign_consistency: 0.15
+    ret_cv: 0.1
+    confidence_score: 0.1
+  eps: 1.0e-12
+
+backtest:
+  signal_mode: state_transition_entry
+  exit_mode: horizon_or_state
+  hold_bars: 10
+  allow_overlap: false
+  allow_unconfirmed: false
+  equity_mode: event_returns_only
+  fee_bps_per_side: 0.0
+  slippage_bps_per_side: 0.0
+  capital_base: 1.0
+  flow_mapping:
+    long_states: [1, 2]
+    short_states: [3, 4]
+    ignore_states: [0]
+  hmm_direction_inference:
+    source_priority: [state_map, validation_scorecard, profile]
+    min_abs_forward_mean_for_direction: 0.0
+  cluster_policy:
+    default_classes: [ALLOW]
+    include_watch_default: false
+  nan_policy:
+    strict_finite_prices: true
+    finite_aggregate_only: true
+
+backtest_policy_overlay:
+  default_overlay_mode: none
+  join_keys: [ticker, trade_date]
+  allow_unknown_for_block_veto: true
+  min_overlay_match_rate_warn: 0.80
+  dedupe_rule: first
+  enable_direction_conflict_metrics: true
+
+backtest_sensitivity:
+  progress_every: 10
+  max_combos: 500
+  stop_on_error: false
+  policy_filter_mode_default: allow_only
+  include_ret_cv_default: true
+  include_tail_metrics_default: true
+  report_top_n_default: 10
+  min_successful_splits_default: 1
+  default_grid:
+    hold_bars: [5, 10, 15, 20]
+    signal_mode: [state_transition_entry]
+    exit_mode: [horizon_or_state]
+    fee_bps_per_side: [0.0, 5.0, 10.0]
+    slippage_bps_per_side: [0.0]
+    allow_overlap: [false]
+    equity_mode: [event_returns_only]
+    include_watch: [false]
+    include_state_sets: [[]]
+  ranking_metric_default: expectancy
+  robustness_score_weights:
+    expectancy_rank: 0.30
+    profit_factor_rank: 0.20
+    drawdown_score: 0.20
+    consistency: 0.15
+    cost_robustness: 0.10
+    hygiene: 0.05
+
 research_clustering:
   default_feature_list:
     - tmf_21

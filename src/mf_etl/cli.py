@@ -63,8 +63,30 @@ from mf_etl.research_hmm.pipeline import (
     run_hmm_sweep,
 )
 from mf_etl.research_hmm.sanity import summarize_hmm_run
+from mf_etl.backtest.pipeline import (
+    run_backtest_compare,
+    run_backtest_run,
+    run_backtest_walkforward,
+)
+from mf_etl.backtest.models import InputType
+from mf_etl.backtest.sanity import summarize_backtest_run
+from mf_etl.backtest.sensitivity_models import GridDimensionValues, SourceInputSpec
+from mf_etl.backtest.sensitivity_runner import (
+    run_backtest_grid,
+    run_backtest_grid_compare,
+    run_backtest_grid_walkforward,
+)
+from mf_etl.backtest.sensitivity_sanity import summarize_grid_run
+from mf_etl.validation.cluster_qa import run_cluster_qa_single, run_cluster_qa_walkforward
+from mf_etl.validation.cluster_hardening import (
+    run_cluster_hardening_compare,
+    run_cluster_hardening_single,
+    run_cluster_hardening_walkforward,
+    summarize_cluster_hardening,
+)
 from mf_etl.validation.pipeline import run_validation_compare, run_validation_harness
 from mf_etl.validation.sanity import summarize_validation_run
+from mf_etl.validation.walkforward import run_validation_walkforward, summarize_validation_walkforward_run
 from mf_etl.silver.placeholders import ensure_silver_placeholder
 from mf_etl.gold.placeholders import ensure_gold_placeholder
 from mf_etl.transform.normalize import BronzeNormalizeMetadata, normalize_bronze_rows
@@ -113,6 +135,21 @@ def _parse_int_csv(value: str, option_name: str) -> list[int]:
     return parsed
 
 
+def _parse_date_csv(value: str, option_name: str) -> list[date]:
+    items = [part.strip() for part in value.split(",") if part.strip() != ""]
+    if not items:
+        raise typer.BadParameter(f"{option_name} must contain at least one YYYY-MM-DD date.")
+    parsed: list[date] = []
+    for item in items:
+        try:
+            parsed.append(date.fromisoformat(item))
+        except ValueError as exc:
+            raise typer.BadParameter(
+                f"{option_name} must be comma-separated dates in YYYY-MM-DD format."
+            ) from exc
+    return parsed
+
+
 def _parse_method_csv(value: str) -> list[str]:
     methods = [part.strip().lower() for part in value.split(",") if part.strip() != ""]
     if not methods:
@@ -122,6 +159,62 @@ def _parse_method_csv(value: str) -> list[str]:
         if method not in allowed:
             raise typer.BadParameter("methods must be comma-separated values from: kmeans,gmm,hdbscan")
     return methods
+
+
+def _parse_float_csv(value: str, option_name: str) -> list[float]:
+    items = [part.strip() for part in value.split(",") if part.strip() != ""]
+    if not items:
+        raise typer.BadParameter(f"{option_name} must contain at least one numeric value.")
+    parsed: list[float] = []
+    for item in items:
+        try:
+            parsed.append(float(item))
+        except ValueError as exc:
+            raise typer.BadParameter(f"{option_name} must be comma-separated numbers.") from exc
+    return parsed
+
+
+def _parse_bool_csv(value: str, option_name: str) -> list[bool]:
+    items = [part.strip().lower() for part in value.split(",") if part.strip() != ""]
+    if not items:
+        raise typer.BadParameter(f"{option_name} must contain at least one boolean value.")
+    out: list[bool] = []
+    mapping = {"true": True, "false": False}
+    for item in items:
+        if item not in mapping:
+            raise typer.BadParameter(f"{option_name} must contain comma-separated true/false values.")
+        out.append(mapping[item])
+    return out
+
+
+def _parse_choice_csv(value: str, option_name: str, allowed: set[str]) -> list[str]:
+    items = [part.strip().lower() for part in value.split(",") if part.strip() != ""]
+    if not items:
+        raise typer.BadParameter(f"{option_name} must contain at least one value.")
+    for item in items:
+        if item not in allowed:
+            allowed_rendered = ",".join(sorted(allowed))
+            raise typer.BadParameter(f"{option_name} values must be from: {allowed_rendered}")
+    return items
+
+
+def _parse_state_set_grid(value: str, option_name: str) -> list[list[int]]:
+    groups = [part.strip() for part in value.split(";") if part.strip() != ""]
+    if not groups:
+        raise typer.BadParameter(f"{option_name} must contain at least one state set.")
+    out: list[list[int]] = []
+    for group in groups:
+        state_items = [p.strip() for p in group.split("|") if p.strip() != ""]
+        if not state_items:
+            raise typer.BadParameter(f"{option_name} has an empty state subset.")
+        subset: list[int] = []
+        for item in state_items:
+            try:
+                subset.append(int(item))
+            except ValueError as exc:
+                raise typer.BadParameter(f"{option_name} supports integer states only.") from exc
+        out.append(sorted(set(subset)))
+    return out
 
 
 def _normalize_choice(value: str | None, *, allowed: set[str], option_name: str) -> str | None:
@@ -2686,6 +2779,1615 @@ def validation_compare(
     typer.echo(f"output_dir: {result.output_dir}")
     typer.echo(f"summary_path: {result.summary_path}")
     typer.echo(f"table_path: {result.table_path}")
+
+
+@app.command("validation-wf-run")
+def validation_wf_run(
+    dataset: Path = typer.Option(
+        ...,
+        "--dataset",
+        help="Path to exported ML dataset parquet.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    train_end_list: str | None = typer.Option(
+        None,
+        "--train-end-list",
+        help="Optional comma-separated train-end dates YYYY-MM-DD.",
+    ),
+    hmm_components: int | None = typer.Option(
+        None,
+        "--hmm-components",
+        min=2,
+        help="HMM component count override.",
+    ),
+    cluster_method: str | None = typer.Option(
+        None,
+        "--cluster-method",
+        help="Cluster method override: gmm or kmeans.",
+    ),
+    cluster_k: int | None = typer.Option(
+        None,
+        "--cluster-k",
+        min=2,
+        help="Cluster count override for kmeans/gmm.",
+    ),
+    scaling_scope: str | None = typer.Option(
+        None,
+        "--scaling-scope",
+        help="Scaling scope override: global or per_ticker.",
+    ),
+    bootstrap_n: int | None = typer.Option(
+        None,
+        "--bootstrap-n",
+        min=10,
+        help="Bootstrap iterations override.",
+    ),
+    bootstrap_mode: str | None = typer.Option(
+        None,
+        "--bootstrap-mode",
+        help="Bootstrap mode override: iid or block.",
+    ),
+    block_length: int | None = typer.Option(
+        None,
+        "--block-length",
+        min=1,
+        help="Block length when bootstrap-mode=block.",
+    ),
+    event_window_pre: int | None = typer.Option(
+        None,
+        "--event-window-pre",
+        min=1,
+        help="Event-study pre-window bars.",
+    ),
+    event_window_post: int | None = typer.Option(
+        None,
+        "--event-window-post",
+        min=1,
+        help="Event-study post-window bars.",
+    ),
+    min_events_per_transition: int | None = typer.Option(
+        None,
+        "--min-events-per-transition",
+        min=1,
+        help="Minimum events per transition code.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Force rerun for all configured splits.",
+    ),
+    force_split: list[str] = typer.Option(
+        [],
+        "--force-split",
+        help="One or more train-end split dates; can be repeated or comma-separated.",
+    ),
+    stop_on_error: bool = typer.Option(
+        False,
+        "--stop-on-error",
+        help="Stop immediately on first split error.",
+    ),
+    max_splits: int | None = typer.Option(
+        None,
+        "--max-splits",
+        min=1,
+        help="Optional max split count (useful for smoke testing).",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run walk-forward OOS validation pack across multiple train-end splits."""
+
+    parsed_train_ends = _parse_date_csv(train_end_list, "train-end-list") if train_end_list is not None else None
+    parsed_force_splits: list[date] = []
+    for raw_value in force_split:
+        parsed_force_splits.extend(_parse_date_csv(raw_value, "force-split"))
+
+    cluster_method_norm = _normalize_choice(
+        cluster_method,
+        allowed={"gmm", "kmeans"},
+        option_name="cluster-method",
+    )
+    scaling_scope_norm = _normalize_choice(
+        scaling_scope,
+        allowed={"global", "per_ticker"},
+        option_name="scaling-scope",
+    )
+    bootstrap_mode_norm = _normalize_choice(
+        bootstrap_mode,
+        allowed={"iid", "block"},
+        option_name="bootstrap-mode",
+    )
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = run_validation_walkforward(
+        settings,
+        dataset_path=dataset,
+        train_end_list=parsed_train_ends,
+        hmm_components=hmm_components,
+        cluster_method=cluster_method_norm,
+        cluster_k=cluster_k,
+        scaling_scope=scaling_scope_norm,
+        bootstrap_n=bootstrap_n,
+        bootstrap_mode=bootstrap_mode_norm,
+        block_length=block_length,
+        event_window_pre=event_window_pre,
+        event_window_post=event_window_post,
+        min_events_per_transition=min_events_per_transition,
+        force=force,
+        force_splits=parsed_force_splits,
+        stop_on_error=stop_on_error,
+        max_splits=max_splits,
+        logger=logger,
+    )
+    aggregate_summary = json.loads(result.aggregate_summary_path.read_text(encoding="utf-8"))
+    typer.echo(f"wf_run_id: {result.wf_run_id}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"splits_total: {aggregate_summary.get('splits_total')}")
+    typer.echo(f"splits_successful: {aggregate_summary.get('splits_successful')}")
+    typer.echo(f"splits_failed: {aggregate_summary.get('splits_failed')}")
+    typer.echo(f"manifest_path: {result.manifest_path}")
+    typer.echo(f"aggregate_summary_path: {result.aggregate_summary_path}")
+    typer.echo(f"full_report_path: {result.full_report_path}")
+
+
+@app.command("validation-wf-sanity")
+def validation_wf_sanity(
+    wf_run_dir: Path = typer.Option(
+        ...,
+        "--wf-run-dir",
+        help="Path to a walk-forward validation run directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+) -> None:
+    """Summarize a completed walk-forward validation run."""
+
+    summary = summarize_validation_walkforward_run(wf_run_dir)
+    typer.echo(f"wf_run_id: {summary.get('wf_run_id')}")
+    typer.echo(f"dataset_path: {summary.get('dataset_path')}")
+    typer.echo(f"splits_total: {summary.get('splits_total')}")
+    typer.echo(f"splits_successful: {summary.get('splits_successful')}")
+    typer.echo(f"splits_failed: {summary.get('splits_failed')}")
+    failed_splits = summary.get("failed_splits", [])
+    if failed_splits:
+        typer.echo("failed_splits:")
+        for row in failed_splits:
+            typer.echo(f"{row.get('train_end')} | error={row.get('error')}")
+    typer.echo("wins_by_metric:")
+    for metric, payload in summary.get("wins_by_metric", {}).items():
+        typer.echo(f"{metric}: {payload}")
+    typer.echo("aggregate_by_model:")
+    for model, payload in summary.get("aggregate_by_model", {}).items():
+        typer.echo(
+            f"{model} | sep_mean={payload.get('forward_separation_score_mean')} | "
+            f"ci_mean={payload.get('avg_ci_width_fwd_ret_10_mean')} | "
+            f"sign_mean={payload.get('avg_state_sign_consistency_mean')} | "
+            f"ret_cv_mean={payload.get('avg_state_ret_cv_mean')}"
+        )
+
+
+@app.command("cluster-qa-run")
+def cluster_qa_run(
+    validation_run_dir: Path | None = typer.Option(
+        None,
+        "--validation-run-dir",
+        help="Single cluster validation run directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    wf_run_dir: Path | None = typer.Option(
+        None,
+        "--wf-run-dir",
+        help="Walk-forward run directory to analyze all cluster validation splits.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    ret_cv_threshold: float | None = typer.Option(
+        None,
+        "--ret-cv-threshold",
+        help="Flag threshold for ret_mean_cv.",
+    ),
+    min_n_rows: int | None = typer.Option(
+        None,
+        "--min-n-rows",
+        min=1,
+        help="Minimum state rows threshold.",
+    ),
+    min_state_share: float | None = typer.Option(
+        None,
+        "--min-state-share",
+        min=0.0,
+        max=1.0,
+        help="Minimum state share threshold.",
+    ),
+    ci_width_quantile_threshold: float | None = typer.Option(
+        None,
+        "--ci-width-quantile-threshold",
+        min=0.0,
+        max=1.0,
+        help="CI width quantile threshold for WIDE_CI flagging.",
+    ),
+    sign_consistency_threshold: float | None = typer.Option(
+        None,
+        "--sign-consistency-threshold",
+        min=0.0,
+        max=1.0,
+        help="Minimum stability sign consistency threshold.",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run cluster instability QA diagnostics for one run or a walk-forward pack."""
+
+    if (validation_run_dir is None and wf_run_dir is None) or (
+        validation_run_dir is not None and wf_run_dir is not None
+    ):
+        raise typer.BadParameter("Specify exactly one of --validation-run-dir or --wf-run-dir.")
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    if validation_run_dir is not None:
+        result = run_cluster_qa_single(
+            settings,
+            validation_run_dir=validation_run_dir,
+            ret_cv_threshold=ret_cv_threshold,
+            min_n_rows=min_n_rows,
+            min_state_share=min_state_share,
+            sign_consistency_threshold=sign_consistency_threshold,
+            ci_width_quantile_threshold=ci_width_quantile_threshold,
+            logger=logger,
+        )
+        summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+        typer.echo("mode: single")
+        typer.echo(f"output_dir: {result.output_dir}")
+        typer.echo(f"states_total: {summary.get('states_total')}")
+        typer.echo(f"states_flagged: {summary.get('states_flagged')}")
+        typer.echo(f"issue_counts: {summary.get('issue_counts')}")
+        typer.echo(f"summary_path: {result.summary_path}")
+        typer.echo(f"flagged_states_path: {result.flagged_states_path}")
+        typer.echo(f"state_windows_path: {result.state_windows_path}")
+        typer.echo(f"report_path: {result.report_path}")
+        return
+
+    result = run_cluster_qa_walkforward(
+        settings,
+        wf_run_dir=wf_run_dir,
+        ret_cv_threshold=ret_cv_threshold,
+        min_n_rows=min_n_rows,
+        min_state_share=min_state_share,
+        sign_consistency_threshold=sign_consistency_threshold,
+        ci_width_quantile_threshold=ci_width_quantile_threshold,
+        logger=logger,
+    )
+    summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    typer.echo("mode: walkforward")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"splits_analyzed: {summary.get('splits_analyzed')}")
+    typer.echo(f"cluster_splits_flagged: {summary.get('cluster_splits_flagged')}")
+    typer.echo(f"total_flagged_states: {summary.get('total_flagged_states')}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"flagged_states_path: {result.flagged_states_path}")
+    typer.echo(f"issue_frequency_path: {result.issue_frequency_path}")
+    typer.echo(f"report_path: {result.report_path}")
+
+
+@app.command("cluster-hardening-run")
+def cluster_hardening_run(
+    validation_run_dir: Path | None = typer.Option(
+        None,
+        "--validation-run-dir",
+        help="Single cluster validation run directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    wf_run_dir: Path | None = typer.Option(
+        None,
+        "--wf-run-dir",
+        help="Walk-forward run directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    clustered_rows_file: Path | None = typer.Option(
+        None,
+        "--clustered-rows-file",
+        help="Optional clustered rows parquet/csv for filtered exports in single-run mode.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    export_filtered: bool = typer.Option(
+        True,
+        "--export-filtered/--no-export-filtered",
+        help="When single-run mode has clustered rows available, export ALLOW/WATCH/full joined rows.",
+    ),
+    min_n_rows_hard: int | None = typer.Option(None, "--min-n-rows-hard", min=1),
+    min_state_share_hard: float | None = typer.Option(None, "--min-state-share-hard", min=0.0, max=1.0),
+    ret_cv_hard: float | None = typer.Option(None, "--ret-cv-hard", min=0.0),
+    sign_consistency_hard: float | None = typer.Option(None, "--sign-consistency-hard", min=0.0, max=1.0),
+    ci_width_hard_quantile: float | None = typer.Option(
+        None,
+        "--ci-width-hard-quantile",
+        min=0.0,
+        max=1.0,
+    ),
+    score_min_allow: float | None = typer.Option(None, "--score-min-allow", min=0.0, max=100.0),
+    score_min_watch: float | None = typer.Option(None, "--score-min-watch", min=0.0, max=100.0),
+    force: bool = typer.Option(False, "--force", help="Force rebuild even if output artifacts already exist."),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run cluster hardening in single validation mode or walk-forward mode."""
+
+    if (validation_run_dir is None and wf_run_dir is None) or (
+        validation_run_dir is not None and wf_run_dir is not None
+    ):
+        raise typer.BadParameter("Specify exactly one of --validation-run-dir or --wf-run-dir.")
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    if validation_run_dir is not None:
+        result = run_cluster_hardening_single(
+            settings,
+            validation_run_dir=validation_run_dir,
+            clustered_rows_file=clustered_rows_file,
+            export_filtered=export_filtered,
+            min_n_rows_hard=min_n_rows_hard,
+            min_state_share_hard=min_state_share_hard,
+            ret_cv_hard=ret_cv_hard,
+            sign_consistency_hard=sign_consistency_hard,
+            ci_width_hard_quantile=ci_width_hard_quantile,
+            score_min_allow=score_min_allow,
+            score_min_watch=score_min_watch,
+            force=force,
+            logger=logger,
+        )
+        policy = json.loads(result.policy_path.read_text(encoding="utf-8"))
+        summary = policy.get("summary", {})
+        typer.echo("mode: single")
+        typer.echo(f"output_dir: {result.output_dir}")
+        typer.echo(f"allow_count: {summary.get('allow_count')}")
+        typer.echo(f"watch_count: {summary.get('watch_count')}")
+        typer.echo(f"block_count: {summary.get('block_count')}")
+        typer.echo(f"policy_path: {result.policy_path}")
+        typer.echo(f"state_table_path: {result.state_table_path}")
+        typer.echo(f"report_path: {result.report_path}")
+        if result.export_summary_path is not None and result.export_summary_path.exists():
+            export_summary = json.loads(result.export_summary_path.read_text(encoding="utf-8"))
+            typer.echo(f"tradable_rows: {export_summary.get('tradable_rows')}")
+            typer.echo(f"watch_rows: {export_summary.get('watch_rows')}")
+            typer.echo(f"export_summary_path: {result.export_summary_path}")
+        return
+
+    result = run_cluster_hardening_walkforward(
+        settings,
+        wf_run_dir=wf_run_dir,
+        min_n_rows_hard=min_n_rows_hard,
+        min_state_share_hard=min_state_share_hard,
+        ret_cv_hard=ret_cv_hard,
+        sign_consistency_hard=sign_consistency_hard,
+        ci_width_hard_quantile=ci_width_hard_quantile,
+        score_min_allow=score_min_allow,
+        score_min_watch=score_min_watch,
+        force=force,
+        logger=logger,
+    )
+    wf_summary = json.loads(result.wf_summary_path.read_text(encoding="utf-8"))
+    typer.echo("mode: walkforward")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"splits_total: {wf_summary.get('splits_total')}")
+    typer.echo(f"splits_successful: {wf_summary.get('splits_successful')}")
+    typer.echo(f"splits_failed: {wf_summary.get('splits_failed')}")
+    typer.echo(f"wf_summary_path: {result.wf_summary_path}")
+    typer.echo(f"wf_state_stats_path: {result.wf_state_stats_path}")
+    typer.echo(f"split_counts_path: {result.split_counts_path}")
+    typer.echo(f"issue_frequency_path: {result.issue_frequency_path}")
+    typer.echo(f"threshold_recommendation_path: {result.threshold_recommendation_path}")
+    typer.echo(f"report_path: {result.report_path}")
+
+
+@app.command("cluster-hardening-sanity")
+def cluster_hardening_sanity(
+    hardening_dir: Path = typer.Option(
+        ...,
+        "--hardening-dir",
+        help="Hardening output directory (single-run or walk-forward).",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+) -> None:
+    """Print concise summary for cluster hardening artifacts."""
+
+    summary = summarize_cluster_hardening(hardening_dir)
+    mode = summary.get("mode")
+    typer.echo(f"mode: {mode}")
+    typer.echo(f"hardening_dir: {summary.get('hardening_dir')}")
+    if mode == "single":
+        s = summary.get("summary", {})
+        typer.echo(f"allow_count: {s.get('allow_count')}")
+        typer.echo(f"watch_count: {s.get('watch_count')}")
+        typer.echo(f"block_count: {s.get('block_count')}")
+        typer.echo("state_table_preview:")
+        for row in summary.get("state_table_preview", [])[:20]:
+            typer.echo(
+                f"state={row.get('state_id')} | class={row.get('class_label')} | "
+                f"score={row.get('tradability_score')} | dir={row.get('allow_direction_hint')} | reasons={row.get('reasons')}"
+            )
+        export_summary = summary.get("export_summary")
+        if export_summary is not None:
+            typer.echo(
+                f"export_rows source={export_summary.get('source_rows')} tradable={export_summary.get('tradable_rows')} watch={export_summary.get('watch_rows')}"
+            )
+        return
+
+    wf = summary.get("summary", {})
+    typer.echo(f"splits_total: {wf.get('splits_total')}")
+    typer.echo(f"splits_successful: {wf.get('splits_successful')}")
+    typer.echo(f"splits_failed: {wf.get('splits_failed')}")
+    typer.echo("split_counts_preview:")
+    for row in summary.get("split_counts_preview", [])[:20]:
+        typer.echo(
+            f"{row.get('train_end')} | status={row.get('status')} | allow={row.get('allow_count')} | watch={row.get('watch_count')} | block={row.get('block_count')}"
+        )
+    typer.echo("issue_frequency_preview:")
+    for row in summary.get("issue_frequency_preview", [])[:20]:
+        typer.echo(f"{row.get('issue')} | split_count={row.get('split_count')} | state_count={row.get('state_count')}")
+
+
+@app.command("cluster-hardening-compare")
+def cluster_hardening_compare(
+    hardening_dir_a: Path = typer.Option(
+        ...,
+        "--hardening-dir-a",
+        help="First single-run hardening output directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    hardening_dir_b: Path = typer.Option(
+        ...,
+        "--hardening-dir-b",
+        help="Second single-run hardening output directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Compare two cluster hardening policies and write diff artifacts."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = run_cluster_hardening_compare(
+        settings,
+        hardening_dir_a=hardening_dir_a,
+        hardening_dir_b=hardening_dir_b,
+        logger=logger,
+    )
+    summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    typer.echo(f"compare_id: {summary.get('compare_id')}")
+    typer.echo(f"run_a_allow_count: {summary.get('run_a_allow_count')}")
+    typer.echo(f"run_b_allow_count: {summary.get('run_b_allow_count')}")
+    typer.echo(f"class_changed_states: {summary.get('class_changed_states')}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"table_path: {result.table_path}")
+
+
+def _resolve_sensitivity_dimensions(
+    settings: AppSettings,
+    *,
+    hold_bars_grid: str | None,
+    signal_mode_grid: str | None,
+    exit_mode_grid: str | None,
+    fee_bps_grid: str | None,
+    slippage_bps_grid: str | None,
+    allow_overlap_grid: str | None,
+    equity_mode_grid: str | None,
+    include_watch_grid: str | None,
+    include_state_ids_grid: str | None,
+) -> GridDimensionValues:
+    cfg = settings.backtest_sensitivity.default_grid
+    signal_allowed = {"state_entry", "state_transition_entry", "state_persistence_confirm"}
+    exit_allowed = {"horizon", "state_exit", "horizon_or_state"}
+    equity_allowed = {"event_returns_only", "daily_equity_curve"}
+
+    hold_bars = _parse_int_csv(hold_bars_grid, "hold-bars-grid") if hold_bars_grid else [int(v) for v in cfg.hold_bars]
+    signal_mode = (
+        _parse_choice_csv(signal_mode_grid, "signal-mode-grid", signal_allowed)
+        if signal_mode_grid
+        else [str(v) for v in cfg.signal_mode]
+    )
+    exit_mode = (
+        _parse_choice_csv(exit_mode_grid, "exit-mode-grid", exit_allowed)
+        if exit_mode_grid
+        else [str(v) for v in cfg.exit_mode]
+    )
+    fee_bps = _parse_float_csv(fee_bps_grid, "fee-bps-grid") if fee_bps_grid else [float(v) for v in cfg.fee_bps_per_side]
+    slippage_bps = (
+        _parse_float_csv(slippage_bps_grid, "slippage-bps-grid")
+        if slippage_bps_grid
+        else [float(v) for v in cfg.slippage_bps_per_side]
+    )
+    allow_overlap = (
+        _parse_bool_csv(allow_overlap_grid, "allow-overlap-grid")
+        if allow_overlap_grid
+        else [bool(v) for v in cfg.allow_overlap]
+    )
+    equity_mode = (
+        _parse_choice_csv(equity_mode_grid, "equity-mode-grid", equity_allowed)
+        if equity_mode_grid
+        else [str(v) for v in cfg.equity_mode]
+    )
+    include_watch = (
+        _parse_bool_csv(include_watch_grid, "include-watch-grid")
+        if include_watch_grid
+        else [bool(v) for v in cfg.include_watch]
+    )
+    include_state_sets = (
+        _parse_state_set_grid(include_state_ids_grid, "include-state-ids-grid")
+        if include_state_ids_grid
+        else [list(v) for v in cfg.include_state_sets]
+    )
+    if not include_state_sets:
+        include_state_sets = [[]]
+
+    return GridDimensionValues(
+        hold_bars=hold_bars,
+        signal_mode=cast(list[str], signal_mode),
+        exit_mode=cast(list[str], exit_mode),
+        fee_bps_per_side=fee_bps,
+        slippage_bps_per_side=slippage_bps,
+        allow_overlap=allow_overlap,
+        equity_mode=cast(list[str], equity_mode),
+        include_watch=include_watch,
+        include_state_sets=include_state_sets,
+    )
+
+
+@app.command("backtest-run")
+def backtest_run(
+    input_type: str = typer.Option(
+        ...,
+        "--input-type",
+        help="Input type: flow, hmm, cluster.",
+    ),
+    input_file: Path = typer.Option(
+        ...,
+        "--input-file",
+        help="Input parquet/csv file.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    validation_run_dir: Path | None = typer.Option(
+        None,
+        "--validation-run-dir",
+        help="Optional validation run dir for HMM state-direction inference.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    cluster_hardening_dir: Path | None = typer.Option(
+        None,
+        "--cluster-hardening-dir",
+        help="Cluster hardening directory for cluster ALLOW/WATCH/BLOCK policy.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    overlay_cluster_file: Path | None = typer.Option(
+        None,
+        "--overlay-cluster-file",
+        help="Overlay cluster rows parquet/csv for hybrid gating.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    overlay_cluster_hardening_dir: Path | None = typer.Option(
+        None,
+        "--overlay-cluster-hardening-dir",
+        help="Overlay cluster hardening directory containing cluster_hardening_policy.json.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    overlay_mode: str | None = typer.Option(
+        None,
+        "--overlay-mode",
+        help="Overlay mode: none, allow_only, allow_watch, block_veto, allow_or_unknown.",
+    ),
+    overlay_join_keys: str | None = typer.Option(
+        None,
+        "--overlay-join-keys",
+        help="Comma-separated join keys. Default: ticker,trade_date",
+    ),
+    state_map_file: Path | None = typer.Option(
+        None,
+        "--state-map-file",
+        help="Optional state map JSON override.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    signal_mode: str | None = typer.Option(
+        None,
+        "--signal-mode",
+        help="Signal mode: state_entry, state_transition_entry, state_persistence_confirm.",
+    ),
+    exit_mode: str | None = typer.Option(
+        None,
+        "--exit-mode",
+        help="Exit mode: horizon, state_exit, horizon_or_state.",
+    ),
+    hold_bars: int | None = typer.Option(None, "--hold-bars", min=1),
+    allow_overlap: bool | None = typer.Option(None, "--allow-overlap/--no-allow-overlap"),
+    allow_unconfirmed: bool | None = typer.Option(None, "--allow-unconfirmed/--no-allow-unconfirmed"),
+    include_watch: bool = typer.Option(False, "--include-watch", help="Cluster mode: include WATCH states."),
+    include_state_ids: str | None = typer.Option(
+        None,
+        "--include-state-ids",
+        help="Optional comma-separated state ids to include (e.g., 1,2,4).",
+    ),
+    fee_bps_per_side: float | None = typer.Option(None, "--fee-bps-per-side", min=0.0),
+    slippage_bps_per_side: float | None = typer.Option(None, "--slippage-bps-per-side", min=0.0),
+    equity_mode: str | None = typer.Option(
+        None,
+        "--equity-mode",
+        help="Equity mode: event_returns_only or daily_equity_curve.",
+    ),
+    export_joined_rows: bool = typer.Option(False, "--export-joined-rows"),
+    tag: str | None = typer.Option(None, "--tag"),
+    force: bool = typer.Option(False, "--force"),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run one deterministic research backtest for FLOW/HMM/CLUSTER states."""
+
+    input_type_norm = _normalize_choice(input_type, allowed={"flow", "hmm", "cluster"}, option_name="input-type")
+    signal_mode_norm = _normalize_choice(
+        signal_mode,
+        allowed={"state_entry", "state_transition_entry", "state_persistence_confirm"},
+        option_name="signal-mode",
+    )
+    exit_mode_norm = _normalize_choice(
+        exit_mode,
+        allowed={"horizon", "state_exit", "horizon_or_state"},
+        option_name="exit-mode",
+    )
+    equity_mode_norm = _normalize_choice(
+        equity_mode,
+        allowed={"event_returns_only", "daily_equity_curve"},
+        option_name="equity-mode",
+    )
+    include_ids = _parse_int_csv(include_state_ids, "include-state-ids") if include_state_ids else []
+    overlay_mode_norm = _normalize_choice(
+        overlay_mode,
+        allowed={"none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"},
+        option_name="overlay-mode",
+    )
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    overlay_keys = (
+        [part.strip() for part in overlay_join_keys.split(",") if part.strip() != ""]
+        if overlay_join_keys
+        else list(settings.backtest_policy_overlay.join_keys)
+    )
+    if (overlay_cluster_file is None) ^ (overlay_cluster_hardening_dir is None):
+        raise typer.BadParameter(
+            "Provide both --overlay-cluster-file and --overlay-cluster-hardening-dir, or neither."
+        )
+    if (overlay_mode_norm or settings.backtest_policy_overlay.default_overlay_mode) != "none" and (
+        overlay_cluster_file is None or overlay_cluster_hardening_dir is None
+    ):
+        raise typer.BadParameter(
+            "overlay-mode is not none but overlay inputs are missing. Provide both overlay inputs."
+        )
+    result = run_backtest_run(
+        settings,
+        input_type=input_type_norm or "flow",
+        input_file=input_file,
+        validation_run_dir=validation_run_dir,
+        cluster_hardening_dir=cluster_hardening_dir,
+        state_map_file=state_map_file,
+        signal_mode=(signal_mode_norm or settings.backtest.signal_mode),
+        exit_mode=(exit_mode_norm or settings.backtest.exit_mode),
+        hold_bars=(hold_bars if hold_bars is not None else settings.backtest.hold_bars),
+        allow_overlap=(allow_overlap if allow_overlap is not None else settings.backtest.allow_overlap),
+        allow_unconfirmed=(
+            allow_unconfirmed if allow_unconfirmed is not None else settings.backtest.allow_unconfirmed
+        ),
+        include_watch=include_watch,
+        include_state_ids=include_ids,
+        overlay_cluster_file=overlay_cluster_file,
+        overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
+        overlay_mode=cast(
+            str,
+            overlay_mode_norm or settings.backtest_policy_overlay.default_overlay_mode,
+        ),
+        overlay_join_keys=overlay_keys,
+        fee_bps_per_side=(
+            fee_bps_per_side if fee_bps_per_side is not None else settings.backtest.fee_bps_per_side
+        ),
+        slippage_bps_per_side=(
+            slippage_bps_per_side
+            if slippage_bps_per_side is not None
+            else settings.backtest.slippage_bps_per_side
+        ),
+        equity_mode=(equity_mode_norm or settings.backtest.equity_mode),
+        export_joined_rows=export_joined_rows,
+        tag=tag,
+        force=force,
+        logger=logger,
+    )
+    payload = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    headline = payload.get("headline", {})
+    typer.echo(f"run_id: {payload.get('run_id')}")
+    typer.echo(f"input_type: {payload.get('input_type')}")
+    typer.echo(f"trade_count: {headline.get('trade_count')}")
+    typer.echo(f"win_rate: {headline.get('win_rate')}")
+    typer.echo(f"avg_return: {headline.get('avg_return')}")
+    typer.echo(f"profit_factor: {headline.get('profit_factor')}")
+    typer.echo(f"expectancy: {headline.get('expectancy')}")
+    overlay_payload = payload.get("overlay", {}) if isinstance(payload.get("overlay"), dict) else {}
+    if overlay_payload:
+        typer.echo(f"overlay_mode: {overlay_payload.get('overlay_mode')}")
+        typer.echo(f"overlay_match_rate: {overlay_payload.get('overlay_match_rate')}")
+        typer.echo(f"overlay_vetoed_signal_share: {overlay_payload.get('overlay_vetoed_signal_share')}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"trades_path: {result.trades_path}")
+    typer.echo(f"report_path: {result.report_path}")
+
+
+@app.command("backtest-sanity")
+def backtest_sanity(
+    run_dir: Path = typer.Option(
+        ...,
+        "--run-dir",
+        help="Backtest run directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+) -> None:
+    """Run sanity checks for one backtest run dir and print compact diagnostics."""
+
+    summary = summarize_backtest_run(run_dir)
+    payload = summary["summary"]
+    headline = payload.get("headline", {})
+    nan_warnings = summary.get("nan_warnings", {})
+    nan_total = sum(int(v) for v in nan_warnings.values())
+    typer.echo(f"run_id: {payload.get('run_id')}")
+    typer.echo(f"input_type: {payload.get('input_type')}")
+    typer.echo(f"trade_count: {headline.get('trade_count')}")
+    typer.echo(f"win_rate: {headline.get('win_rate')}")
+    typer.echo(f"avg_return: {headline.get('avg_return')}")
+    typer.echo(f"profit_factor: {headline.get('profit_factor')}")
+    typer.echo(f"expectancy: {headline.get('expectancy')}")
+    typer.echo(f"nan_warning_total: {nan_total}")
+    errors = summary.get("errors", [])
+    typer.echo(f"errors: {errors if errors else 'none'}")
+    policy_info = summary.get("policy_info")
+    if policy_info is not None:
+        typer.echo(
+            f"policy allow/watch/block: {policy_info.get('allow_count')}/{policy_info.get('watch_count')}/{policy_info.get('block_count')}"
+        )
+    overlay_info = summary.get("overlay_info")
+    if overlay_info is not None:
+        typer.echo(
+            f"overlay mode={overlay_info.get('overlay_mode')} match_rate={overlay_info.get('overlay_match_rate')} "
+            f"veto_share={overlay_info.get('overlay_vetoed_signal_share')} conflict_share={overlay_info.get('overlay_direction_conflict_share')}"
+        )
+    typer.echo("top_states:")
+    for row in summary.get("top_states", [])[:10]:
+        typer.echo(
+            f"state={row.get('entry_state_id')} class={row.get('entry_state_class')} trades={row.get('trade_count')} avg={row.get('avg_return')}"
+        )
+
+
+@app.command("backtest-compare")
+def backtest_compare(
+    run_dir: list[Path] = typer.Option(
+        ...,
+        "--run-dir",
+        help="Backtest run directory (repeat option for multiple runs).",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Compare two or more backtest runs and write compare artifacts."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    result = run_backtest_compare(settings, run_dirs=run_dir, logger=logger)
+    payload = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    typer.echo(f"compare_id: {payload.get('compare_id')}")
+    typer.echo(f"runs_count: {len(payload.get('run_dirs', []))}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"table_path: {result.table_path}")
+    typer.echo(f"report_path: {result.report_path}")
+
+
+@app.command("backtest-wf-run")
+def backtest_wf_run(
+    wf_run_dir: Path = typer.Option(
+        ...,
+        "--wf-run-dir",
+        help="Validation walk-forward directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    flow_dataset_file: Path | None = typer.Option(
+        None,
+        "--flow-dataset-file",
+        help="Optional flow dataset file fallback.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    overlay_cluster_file: Path | None = typer.Option(
+        None,
+        "--overlay-cluster-file",
+        help="Overlay cluster rows parquet/csv for hybrid gating.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    overlay_cluster_hardening_dir: Path | None = typer.Option(
+        None,
+        "--overlay-cluster-hardening-dir",
+        help="Overlay cluster hardening directory with cluster_hardening_policy.json.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    overlay_mode: str | None = typer.Option(
+        None,
+        "--overlay-mode",
+        help="Overlay mode: none, allow_only, allow_watch, block_veto, allow_or_unknown.",
+    ),
+    overlay_join_keys: str | None = typer.Option(
+        None,
+        "--overlay-join-keys",
+        help="Comma-separated join keys. Default: ticker,trade_date",
+    ),
+    signal_mode: str | None = typer.Option(None, "--signal-mode"),
+    exit_mode: str | None = typer.Option(None, "--exit-mode"),
+    hold_bars: int | None = typer.Option(None, "--hold-bars", min=1),
+    fee_bps_per_side: float | None = typer.Option(None, "--fee-bps-per-side", min=0.0),
+    slippage_bps_per_side: float | None = typer.Option(None, "--slippage-bps-per-side", min=0.0),
+    allow_overlap: bool | None = typer.Option(None, "--allow-overlap/--no-allow-overlap"),
+    allow_unconfirmed: bool | None = typer.Option(None, "--allow-unconfirmed/--no-allow-unconfirmed"),
+    include_watch: bool = typer.Option(False, "--include-watch"),
+    equity_mode: str | None = typer.Option(None, "--equity-mode"),
+    force: bool = typer.Option(False, "--force"),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run HMM/FLOW/CLUSTER backtests across a validation walk-forward pack."""
+
+    signal_mode_norm = _normalize_choice(
+        signal_mode,
+        allowed={"state_entry", "state_transition_entry", "state_persistence_confirm"},
+        option_name="signal-mode",
+    )
+    exit_mode_norm = _normalize_choice(
+        exit_mode,
+        allowed={"horizon", "state_exit", "horizon_or_state"},
+        option_name="exit-mode",
+    )
+    equity_mode_norm = _normalize_choice(
+        equity_mode,
+        allowed={"event_returns_only", "daily_equity_curve"},
+        option_name="equity-mode",
+    )
+    overlay_mode_norm = _normalize_choice(
+        overlay_mode,
+        allowed={"none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"},
+        option_name="overlay-mode",
+    )
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    if (overlay_cluster_file is None) ^ (overlay_cluster_hardening_dir is None):
+        raise typer.BadParameter(
+            "Provide both --overlay-cluster-file and --overlay-cluster-hardening-dir, or neither."
+        )
+    if (overlay_mode_norm or settings.backtest_policy_overlay.default_overlay_mode) != "none" and (
+        overlay_cluster_file is None or overlay_cluster_hardening_dir is None
+    ):
+        raise typer.BadParameter(
+            "overlay-mode is not none but overlay inputs are missing. Provide both overlay inputs."
+        )
+    overlay_keys = (
+        [part.strip() for part in overlay_join_keys.split(",") if part.strip() != ""]
+        if overlay_join_keys
+        else list(settings.backtest_policy_overlay.join_keys)
+    )
+    result = run_backtest_walkforward(
+        settings,
+        wf_run_dir=wf_run_dir,
+        flow_dataset_file=flow_dataset_file,
+        overlay_cluster_file=overlay_cluster_file,
+        overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
+        overlay_mode=cast(
+            str,
+            overlay_mode_norm or settings.backtest_policy_overlay.default_overlay_mode,
+        ),
+        overlay_join_keys=overlay_keys,
+        signal_mode=(signal_mode_norm or settings.backtest.signal_mode),
+        exit_mode=(exit_mode_norm or settings.backtest.exit_mode),
+        hold_bars=(hold_bars if hold_bars is not None else settings.backtest.hold_bars),
+        fee_bps_per_side=(
+            fee_bps_per_side if fee_bps_per_side is not None else settings.backtest.fee_bps_per_side
+        ),
+        slippage_bps_per_side=(
+            slippage_bps_per_side
+            if slippage_bps_per_side is not None
+            else settings.backtest.slippage_bps_per_side
+        ),
+        allow_overlap=(allow_overlap if allow_overlap is not None else settings.backtest.allow_overlap),
+        allow_unconfirmed=(
+            allow_unconfirmed if allow_unconfirmed is not None else settings.backtest.allow_unconfirmed
+        ),
+        include_watch=include_watch,
+        equity_mode=(equity_mode_norm or settings.backtest.equity_mode),
+        force=force,
+        logger=logger,
+    )
+    payload = json.loads(result.aggregate_summary_path.read_text(encoding="utf-8"))
+    typer.echo(f"wf_bt_id: {result.wf_bt_id}")
+    typer.echo(f"splits_total: {payload.get('splits_total')}")
+    typer.echo(f"splits_successful: {payload.get('splits_successful')}")
+    typer.echo(f"splits_failed: {payload.get('splits_failed')}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"manifest_path: {result.manifest_path}")
+    typer.echo(f"aggregate_summary_path: {result.aggregate_summary_path}")
+    typer.echo(f"model_summary_path: {result.model_summary_path}")
+    typer.echo(f"report_path: {result.report_path}")
+
+
+@app.command("backtest-grid-run")
+def backtest_grid_run(
+    multi_source: bool = typer.Option(False, "--multi-source", help="Run aligned grid across multiple sources."),
+    input_type: str | None = typer.Option(None, "--input-type", help="Single-source mode: flow, hmm, cluster."),
+    input_file: Path | None = typer.Option(
+        None,
+        "--input-file",
+        help="Single-source mode input file.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    flow_input_file: Path | None = typer.Option(
+        None,
+        "--flow-input-file",
+        help="Multi-source FLOW input file.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    hmm_input_file: Path | None = typer.Option(
+        None,
+        "--hmm-input-file",
+        help="Multi-source HMM decoded rows file.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    cluster_input_file: Path | None = typer.Option(
+        None,
+        "--cluster-input-file",
+        help="Multi-source cluster rows file.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    validation_run_dir: Path | None = typer.Option(
+        None,
+        "--validation-run-dir",
+        help="Optional HMM validation run directory for direction inference.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    cluster_hardening_dir: Path | None = typer.Option(
+        None,
+        "--cluster-hardening-dir",
+        help="Cluster hardening directory for cluster mapping.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    overlay_cluster_file: Path | None = typer.Option(
+        None,
+        "--overlay-cluster-file",
+        help="Overlay cluster rows parquet/csv for hybrid gating.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    overlay_cluster_hardening_dir: Path | None = typer.Option(
+        None,
+        "--overlay-cluster-hardening-dir",
+        help="Overlay cluster hardening directory containing cluster_hardening_policy.json.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    overlay_mode: str | None = typer.Option(
+        None,
+        "--overlay-mode",
+        help="Overlay mode: none, allow_only, allow_watch, block_veto, allow_or_unknown.",
+    ),
+    overlay_join_keys: str | None = typer.Option(
+        None,
+        "--overlay-join-keys",
+        help="Comma-separated join keys. Default: ticker,trade_date",
+    ),
+    state_map_file: Path | None = typer.Option(
+        None,
+        "--state-map-file",
+        help="Optional JSON state map override.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    hold_bars_grid: str | None = typer.Option(None, "--hold-bars-grid"),
+    signal_mode_grid: str | None = typer.Option(None, "--signal-mode-grid"),
+    exit_mode_grid: str | None = typer.Option(None, "--exit-mode-grid"),
+    fee_bps_grid: str | None = typer.Option(None, "--fee-bps-grid"),
+    slippage_bps_grid: str | None = typer.Option(None, "--slippage-bps-grid"),
+    allow_overlap_grid: str | None = typer.Option(None, "--allow-overlap-grid"),
+    equity_mode_grid: str | None = typer.Option(None, "--equity-mode-grid"),
+    include_watch_grid: str | None = typer.Option(None, "--include-watch-grid"),
+    include_state_ids_grid: str | None = typer.Option(
+        None,
+        "--include-state-ids-grid",
+        help="Semicolon-delimited state subsets, each subset pipe-delimited. Example: 1|2|4;2|3|4",
+    ),
+    policy_filter_mode: str | None = typer.Option(
+        None,
+        "--policy-filter-mode",
+        help="Cluster policy filter mode: allow_only, allow_watch, all_states.",
+    ),
+    include_ret_cv: bool | None = typer.Option(None, "--include-ret-cv/--no-include-ret-cv"),
+    include_tail_metrics: bool | None = typer.Option(None, "--include-tail-metrics/--no-include-tail-metrics"),
+    report_top_n: int | None = typer.Option(None, "--report-top-n", min=1),
+    max_combos: int | None = typer.Option(None, "--max-combos", min=1),
+    shuffle_grid: bool = typer.Option(False, "--shuffle-grid"),
+    seed: int = typer.Option(42, "--seed"),
+    tag: str | None = typer.Option(None, "--tag"),
+    force: bool = typer.Option(False, "--force"),
+    progress_every: int | None = typer.Option(None, "--progress-every", min=1),
+    stop_on_error: bool = typer.Option(False, "--stop-on-error"),
+    write_run_manifest: bool = typer.Option(True, "--write-run-manifest/--no-write-run-manifest"),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run a parameter sensitivity grid for one source or aligned multi-source."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    policy_filter_mode_norm = _normalize_choice(
+        policy_filter_mode,
+        allowed={"allow_only", "allow_watch", "all_states"},
+        option_name="policy-filter-mode",
+    ) or settings.backtest_sensitivity.policy_filter_mode_default
+    overlay_mode_norm = _normalize_choice(
+        overlay_mode,
+        allowed={"none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"},
+        option_name="overlay-mode",
+    ) or settings.backtest_policy_overlay.default_overlay_mode
+    overlay_join_keys_norm = (
+        [part.strip() for part in overlay_join_keys.split(",") if part.strip() != ""]
+        if overlay_join_keys
+        else list(settings.backtest_policy_overlay.join_keys)
+    )
+    if (overlay_cluster_file is None) ^ (overlay_cluster_hardening_dir is None):
+        raise typer.BadParameter(
+            "Provide both --overlay-cluster-file and --overlay-cluster-hardening-dir, or neither."
+        )
+    if overlay_mode_norm != "none" and (overlay_cluster_file is None or overlay_cluster_hardening_dir is None):
+        raise typer.BadParameter(
+            "overlay-mode is not none but overlay inputs are missing. Provide both overlay inputs."
+        )
+    dims = _resolve_sensitivity_dimensions(
+        settings,
+        hold_bars_grid=hold_bars_grid,
+        signal_mode_grid=signal_mode_grid,
+        exit_mode_grid=exit_mode_grid,
+        fee_bps_grid=fee_bps_grid,
+        slippage_bps_grid=slippage_bps_grid,
+        allow_overlap_grid=allow_overlap_grid,
+        equity_mode_grid=equity_mode_grid,
+        include_watch_grid=include_watch_grid,
+        include_state_ids_grid=include_state_ids_grid,
+    )
+
+    source_specs: list[SourceInputSpec] = []
+    if multi_source:
+        if flow_input_file is not None:
+            source_specs.append(
+                SourceInputSpec(
+                    source_type="flow",
+                    input_file=flow_input_file,
+                    overlay_cluster_file=overlay_cluster_file,
+                    overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
+                    overlay_mode=cast(str, overlay_mode_norm),
+                    overlay_join_keys=overlay_join_keys_norm,
+                )
+            )
+        if hmm_input_file is not None:
+            source_specs.append(
+                SourceInputSpec(
+                    source_type="hmm",
+                    input_file=hmm_input_file,
+                    validation_run_dir=validation_run_dir,
+                    state_map_file=state_map_file,
+                    overlay_cluster_file=overlay_cluster_file,
+                    overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
+                    overlay_mode=cast(str, overlay_mode_norm),
+                    overlay_join_keys=overlay_join_keys_norm,
+                )
+            )
+        if cluster_input_file is not None:
+            source_specs.append(
+                SourceInputSpec(
+                    source_type="cluster",
+                    input_file=cluster_input_file,
+                    cluster_hardening_dir=cluster_hardening_dir,
+                    policy_filter_mode=cast(str, policy_filter_mode_norm),
+                    overlay_cluster_file=overlay_cluster_file,
+                    overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
+                    overlay_mode=cast(str, overlay_mode_norm),
+                    overlay_join_keys=overlay_join_keys_norm,
+                )
+            )
+        if len(source_specs) < 2:
+            raise typer.BadParameter("multi-source mode requires at least two source input files.")
+    else:
+        input_type_norm = _normalize_choice(input_type, allowed={"flow", "hmm", "cluster"}, option_name="input-type")
+        if input_type_norm is None:
+            raise typer.BadParameter("--input-type is required in single-source mode.")
+        if input_file is None:
+            raise typer.BadParameter("--input-file is required in single-source mode.")
+        source_specs.append(
+            SourceInputSpec(
+                source_type=cast(InputType, input_type_norm),
+                input_file=input_file,
+                validation_run_dir=validation_run_dir if input_type_norm == "hmm" else None,
+                cluster_hardening_dir=cluster_hardening_dir if input_type_norm == "cluster" else None,
+                state_map_file=state_map_file if input_type_norm == "hmm" else None,
+                policy_filter_mode=(cast(str, policy_filter_mode_norm) if input_type_norm == "cluster" else "allow_only"),
+                overlay_cluster_file=overlay_cluster_file,
+                overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
+                overlay_mode=cast(str, overlay_mode_norm),
+                overlay_join_keys=overlay_join_keys_norm,
+            )
+        )
+
+    result = run_backtest_grid(
+        settings,
+        source_specs=source_specs,
+        dimensions=dims,
+        tag=tag,
+        max_combos=max_combos,
+        shuffle_grid=shuffle_grid,
+        seed=seed,
+        progress_every=progress_every,
+        stop_on_error=stop_on_error,
+        force=force,
+        write_run_manifest=write_run_manifest,
+        include_ret_cv=(
+            include_ret_cv if include_ret_cv is not None else settings.backtest_sensitivity.include_ret_cv_default
+        ),
+        include_tail_metrics=(
+            include_tail_metrics
+            if include_tail_metrics is not None
+            else settings.backtest_sensitivity.include_tail_metrics_default
+        ),
+        report_top_n=(
+            report_top_n if report_top_n is not None else settings.backtest_sensitivity.report_top_n_default
+        ),
+        logger=logger,
+    )
+    summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    typer.echo(f"grid_run_id: {summary.get('grid_run_id')}")
+    typer.echo(f"scope: {summary.get('scope')}")
+    typer.echo(f"comparability: {summary.get('comparability')}")
+    typer.echo(f"total_combos: {summary.get('total_combos')}")
+    typer.echo(f"successful_combos: {summary.get('successful_combos')}")
+    typer.echo(f"failed_combos: {summary.get('failed_combos')}")
+    typer.echo(f"zero_trade_combos: {summary.get('zero_trade_combos')}")
+    typer.echo(f"zero_trade_combo_share: {summary.get('zero_trade_combo_share')}")
+    typer.echo(f"non_finite_cells: {summary.get('non_finite_cells')}")
+    typer.echo(f"null_metric_cells: {summary.get('null_metric_cells')}")
+    typer.echo(f"overlay_enabled: {any(bool((s or {}).get('overlay_cluster_file')) for s in summary.get('sources', []))}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"manifest_path: {result.manifest_path}")
+    typer.echo(f"metrics_table_path: {result.metrics_table_path}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"report_path: {result.report_path}")
+
+
+@app.command("backtest-grid-sanity")
+def backtest_grid_sanity(
+    grid_run_dir: Path = typer.Option(
+        ...,
+        "--grid-run-dir",
+        help="Backtest sensitivity grid output directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    )
+) -> None:
+    """Run QA checks and print compact summary for one grid run."""
+
+    summary = summarize_grid_run(grid_run_dir)
+    payload = summary.get("summary", {})
+    status_counts = summary.get("status_counts", {})
+    typer.echo(f"grid_run_id: {payload.get('grid_run_id')}")
+    typer.echo(f"scope: {payload.get('scope')}")
+    typer.echo(f"comparability: {payload.get('comparability')}")
+    typer.echo(f"total_combos: {payload.get('total_combos')}")
+    typer.echo(
+        f"status_counts: success={status_counts.get('SUCCESS',0)} failed={status_counts.get('FAILED',0)} skipped={status_counts.get('SKIPPED',0)}"
+    )
+    typer.echo(f"errors: {summary.get('errors') or 'none'}")
+    typer.echo(f"warnings: {summary.get('warnings') or 'none'}")
+    typer.echo(f"non_finite_cells: {summary.get('non_finite_cells')}")
+    typer.echo(f"null_metric_cells: {summary.get('null_metric_cells')}")
+    typer.echo(f"zero_trade_combos: {summary.get('zero_trade_combos')}")
+    typer.echo("top_expectancy:")
+    for row in summary.get("top_expectancy", [])[:10]:
+        typer.echo(
+            f"src={row.get('source_type')} combo={row.get('combo_id')} hb={row.get('hold_bars')} "
+            f"sig={row.get('signal_mode')} fee={row.get('fee_bps_per_side')} exp={row.get('expectancy')} "
+            f"pf={row.get('profit_factor')} ret_cv={row.get('ret_cv')} downside={row.get('downside_std')} "
+            f"rob_v2={row.get('robustness_score_v2')} overlay_mode={row.get('overlay_mode')} "
+            f"overlay_veto_share={row.get('overlay_vetoed_signal_share')}"
+        )
+
+
+@app.command("backtest-grid-compare")
+def backtest_grid_compare(
+    grid_run_dir: list[Path] = typer.Option(
+        ...,
+        "--grid-run-dir",
+        help="Grid run directory (repeat option).",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    metric: list[str] = typer.Option(
+        [],
+        "--metric",
+        help="Optional prioritized metric(s), repeat option. Example: --metric expectancy --metric profit_factor",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Compare two or more sensitivity grid runs."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    allowed_metrics = {
+        "expectancy",
+        "profit_factor",
+        "max_drawdown",
+        "sharpe_proxy",
+        "robustness_score",
+        "robustness_score_v1",
+        "robustness_score_v2",
+        "ret_cv",
+        "downside_std",
+        "avg_return",
+        "win_rate",
+    }
+    metric_norm = [m.strip().lower() for m in metric if m.strip() != ""]
+    for value in metric_norm:
+        if value not in allowed_metrics:
+            raise typer.BadParameter(f"metric must be one of: {','.join(sorted(allowed_metrics))}")
+    result = run_backtest_grid_compare(
+        settings,
+        grid_run_dirs=grid_run_dir,
+        metrics=metric_norm or None,
+        logger=logger,
+    )
+    payload = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    typer.echo(f"compare_id: {payload.get('compare_id')}")
+    typer.echo(f"primary_metric: {payload.get('primary_metric')}")
+    typer.echo(f"grid_runs: {len(payload.get('grid_run_dirs', []))}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"table_path: {result.table_path}")
+    typer.echo(f"report_path: {result.report_path}")
+
+
+@app.command("backtest-grid-wf-run")
+def backtest_grid_wf_run(
+    wf_run_dir: Path = typer.Option(
+        ...,
+        "--wf-run-dir",
+        help="Validation walk-forward directory.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    flow_dataset_file: Path | None = typer.Option(
+        None,
+        "--flow-dataset-file",
+        help="Optional flow dataset fallback path.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    overlay_cluster_file: Path | None = typer.Option(
+        None,
+        "--overlay-cluster-file",
+        help="Overlay cluster rows parquet/csv for hybrid gating.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    overlay_cluster_hardening_dir: Path | None = typer.Option(
+        None,
+        "--overlay-cluster-hardening-dir",
+        help="Overlay cluster hardening directory containing cluster_hardening_policy.json.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    overlay_mode: str | None = typer.Option(
+        None,
+        "--overlay-mode",
+        help="Overlay mode: none, allow_only, allow_watch, block_veto, allow_or_unknown.",
+    ),
+    overlay_join_keys: str | None = typer.Option(
+        None,
+        "--overlay-join-keys",
+        help="Comma-separated join keys. Default: ticker,trade_date",
+    ),
+    hold_bars_grid: str | None = typer.Option(None, "--hold-bars-grid"),
+    signal_mode_grid: str | None = typer.Option(None, "--signal-mode-grid"),
+    exit_mode_grid: str | None = typer.Option(None, "--exit-mode-grid"),
+    fee_bps_grid: str | None = typer.Option(None, "--fee-bps-grid"),
+    slippage_bps_grid: str | None = typer.Option(None, "--slippage-bps-grid"),
+    allow_overlap_grid: str | None = typer.Option(None, "--allow-overlap-grid"),
+    equity_mode_grid: str | None = typer.Option(None, "--equity-mode-grid"),
+    include_watch_grid: str | None = typer.Option(None, "--include-watch-grid"),
+    include_state_ids_grid: str | None = typer.Option(None, "--include-state-ids-grid"),
+    train_ends: str | None = typer.Option(None, "--train-ends", help="Comma-separated train-end dates."),
+    train_start: str | None = typer.Option(None, "--train-start", help="Schedule mode: start YYYY-MM-DD."),
+    train_end_final: str | None = typer.Option(None, "--train-end-final", help="Schedule mode: end YYYY-MM-DD."),
+    step_years: int | None = typer.Option(None, "--step-years", min=1),
+    sources: str | None = typer.Option(None, "--sources", help="Comma-separated sources: hmm,flow,cluster"),
+    policy_filter_mode: str | None = typer.Option(
+        None,
+        "--policy-filter-mode",
+        help="Cluster policy filter mode: allow_only, allow_watch, all_states.",
+    ),
+    min_successful_splits: int | None = typer.Option(None, "--min-successful-splits", min=1),
+    report_top_n: int | None = typer.Option(None, "--report-top-n", min=1),
+    max_combos: int | None = typer.Option(None, "--max-combos", min=1),
+    shuffle_grid: bool = typer.Option(False, "--shuffle-grid"),
+    seed: int = typer.Option(42, "--seed"),
+    progress_every: int | None = typer.Option(None, "--progress-every", min=1),
+    stop_on_error: bool = typer.Option(False, "--stop-on-error"),
+    force: bool = typer.Option(False, "--force"),
+    tag: str | None = typer.Option(None, "--tag"),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run backtest sensitivity grid across a validation walk-forward pack."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    policy_filter_mode_norm = _normalize_choice(
+        policy_filter_mode,
+        allowed={"allow_only", "allow_watch", "all_states"},
+        option_name="policy-filter-mode",
+    ) or settings.backtest_sensitivity.policy_filter_mode_default
+    overlay_mode_norm = _normalize_choice(
+        overlay_mode,
+        allowed={"none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"},
+        option_name="overlay-mode",
+    ) or settings.backtest_policy_overlay.default_overlay_mode
+    overlay_join_keys_norm = (
+        [part.strip() for part in overlay_join_keys.split(",") if part.strip() != ""]
+        if overlay_join_keys
+        else list(settings.backtest_policy_overlay.join_keys)
+    )
+    if (overlay_cluster_file is None) ^ (overlay_cluster_hardening_dir is None):
+        raise typer.BadParameter(
+            "Provide both --overlay-cluster-file and --overlay-cluster-hardening-dir, or neither."
+        )
+    if overlay_mode_norm != "none" and (overlay_cluster_file is None or overlay_cluster_hardening_dir is None):
+        raise typer.BadParameter(
+            "overlay-mode is not none but overlay inputs are missing. Provide both overlay inputs."
+        )
+    sources_norm: list[str] | None = None
+    if sources:
+        sources_norm = _parse_choice_csv(sources, "sources", {"hmm", "flow", "cluster"})
+    train_ends_norm: list[str] | None = None
+    if train_ends:
+        train_ends_norm = [d.isoformat() for d in _parse_date_csv(train_ends, "train-ends")]
+    dims = _resolve_sensitivity_dimensions(
+        settings,
+        hold_bars_grid=hold_bars_grid,
+        signal_mode_grid=signal_mode_grid,
+        exit_mode_grid=exit_mode_grid,
+        fee_bps_grid=fee_bps_grid,
+        slippage_bps_grid=slippage_bps_grid,
+        allow_overlap_grid=allow_overlap_grid,
+        equity_mode_grid=equity_mode_grid,
+        include_watch_grid=include_watch_grid,
+        include_state_ids_grid=include_state_ids_grid,
+    )
+    result = run_backtest_grid_walkforward(
+        settings,
+        wf_run_dir=wf_run_dir,
+        flow_dataset_file=flow_dataset_file,
+        overlay_cluster_file=overlay_cluster_file,
+        overlay_cluster_hardening_dir=overlay_cluster_hardening_dir,
+        overlay_mode=cast(str, overlay_mode_norm),
+        overlay_join_keys=overlay_join_keys_norm,
+        train_ends=train_ends_norm,
+        train_start=train_start,
+        train_end_final=train_end_final,
+        step_years=step_years,
+        sources=sources_norm,
+        policy_filter_mode=cast(str, policy_filter_mode_norm),
+        dimensions=dims,
+        max_combos=max_combos,
+        shuffle_grid=shuffle_grid,
+        seed=seed,
+        progress_every=progress_every,
+        stop_on_error=stop_on_error,
+        force=force,
+        tag=tag,
+        min_successful_splits=(
+            min_successful_splits
+            if min_successful_splits is not None
+            else settings.backtest_sensitivity.min_successful_splits_default
+        ),
+        report_top_n=(
+            report_top_n if report_top_n is not None else settings.backtest_sensitivity.report_top_n_default
+        ),
+        logger=logger,
+    )
+    summary = json.loads((result.output_dir / "wf_grid_summary.json").read_text(encoding="utf-8"))
+    typer.echo(f"wf_grid_id: {summary.get('wf_grid_id')}")
+    typer.echo(f"splits_total: {summary.get('splits_total')}")
+    typer.echo(f"splits_successful: {summary.get('splits_successful')}")
+    typer.echo(f"splits_failed: {summary.get('splits_failed')}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"manifest_path: {result.manifest_path}")
+    typer.echo(f"by_split_path: {result.by_split_path}")
+    typer.echo(f"config_aggregate_path: {result.config_aggregate_path}")
+    typer.echo(f"source_summary_path: {result.source_summary_path}")
+    typer.echo(f"source_dimension_summary_path: {result.output_dir / 'wf_grid_source_dimension_summary.csv'}")
+    typer.echo(f"config_consistency_path: {result.output_dir / 'wf_grid_config_consistency.csv'}")
+    typer.echo(f"winner_stability_path: {result.output_dir / 'wf_grid_winner_stability.csv'}")
+    typer.echo(f"cost_fragility_summary_path: {result.output_dir / 'wf_grid_cost_fragility_summary.csv'}")
+    typer.echo(f"tail_risk_summary_path: {result.output_dir / 'wf_grid_tail_risk_summary.csv'}")
+    typer.echo(f"overlay_split_summary_path: {result.output_dir / 'wf_overlay_split_summary.csv'}")
+    typer.echo(f"overlay_source_summary_path: {result.output_dir / 'wf_overlay_source_summary.csv'}")
+    typer.echo(f"overlay_effectiveness_summary_path: {result.output_dir / 'wf_overlay_effectiveness_summary.csv'}")
+    typer.echo(f"report_path: {result.report_path}")
 
 
 def main() -> None:

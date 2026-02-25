@@ -128,6 +128,202 @@ class ValidationConfig(BaseModel):
     io: ValidationIOConfig = Field(default_factory=ValidationIOConfig)
 
 
+class ValidationWalkForwardConfig(BaseModel):
+    """Walk-forward orchestration defaults for multi-split OOS validation packs."""
+
+    train_end_list_default: list[date] = Field(
+        default_factory=lambda: [
+            date(2012, 12, 31),
+            date(2014, 12, 31),
+            date(2016, 12, 31),
+            date(2018, 12, 31),
+            date(2020, 12, 31),
+        ],
+        min_length=1,
+    )
+    hmm_components_default: int = Field(default=5, ge=2)
+    cluster_method_default: Literal["gmm", "kmeans"] = "gmm"
+    cluster_k_default: int = Field(default=5, ge=2)
+    scaling_scope_default: Literal["global", "per_ticker"] = "per_ticker"
+    continue_on_error_default: bool = True
+
+
+class ClusterQAConfig(BaseModel):
+    """Thresholds for diagnosing unstable cluster validation states."""
+
+    ret_cv_threshold: float = Field(default=5.0, gt=0.0)
+    min_n_rows: int = Field(default=200, ge=1)
+    min_state_share: float = Field(default=0.03, ge=0.0, le=1.0)
+    sign_consistency_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
+    ci_width_quantile_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
+    eps: float = Field(default=1e-12, gt=0.0)
+
+
+class ClusterHardeningPenaltyConfig(BaseModel):
+    """Penalty map for cluster hardening QA issue labels."""
+
+    LOW_N: float = 20.0
+    LOW_OCCUPANCY: float = 20.0
+    MEAN_NEAR_ZERO_CV_INFLATION: float = 15.0
+    WIDE_CI: float = 15.0
+    SIGN_FLIP_ACROSS_WINDOWS: float = 20.0
+    WINDOW_DRIFT_HIGH: float = 15.0
+    LIKELY_OUTLIER_WINDOW: float = 10.0
+    TRANSITIONS_TOO_SPARSE: float = 10.0
+
+
+class ClusterHardeningWeightsConfig(BaseModel):
+    """Component weights for tradability scoring."""
+
+    sample_size: float = 0.15
+    occupancy: float = 0.15
+    sign_confidence: float = 0.20
+    ci_width: float = 0.15
+    sign_consistency: float = 0.15
+    ret_cv: float = 0.10
+    confidence_score: float = 0.10
+
+
+class ClusterHardeningConfig(BaseModel):
+    """State hardening thresholds and scoring controls."""
+
+    min_n_rows_hard: int = Field(default=200, ge=1)
+    min_state_share_hard: float = Field(default=0.03, ge=0.0, le=1.0)
+    ret_cv_hard: float = Field(default=6.0, gt=0.0)
+    sign_consistency_hard: float = Field(default=0.55, ge=0.0, le=1.0)
+    ci_width_hard_quantile: float = Field(default=0.80, ge=0.0, le=1.0)
+    score_min_allow: float = Field(default=70.0, ge=0.0, le=100.0)
+    score_min_watch: float = Field(default=45.0, ge=0.0, le=100.0)
+    penalties: ClusterHardeningPenaltyConfig = Field(default_factory=ClusterHardeningPenaltyConfig)
+    weights: ClusterHardeningWeightsConfig = Field(default_factory=ClusterHardeningWeightsConfig)
+    eps: float = Field(default=1e-12, gt=0.0)
+
+
+class BacktestFlowMappingConfig(BaseModel):
+    """Default deterministic mapping for flow_state_code direction classes."""
+
+    long_states: list[int] = Field(default_factory=lambda: [1, 2])
+    short_states: list[int] = Field(default_factory=lambda: [3, 4])
+    ignore_states: list[int] = Field(default_factory=lambda: [0])
+
+
+class BacktestHMMDirectionInferenceConfig(BaseModel):
+    """Controls for HMM state-direction inference fallback order."""
+
+    source_priority: list[Literal["state_map", "validation_scorecard", "profile"]] = Field(
+        default_factory=lambda: ["state_map", "validation_scorecard", "profile"]
+    )
+    min_abs_forward_mean_for_direction: float = Field(default=0.0, ge=0.0)
+
+
+class BacktestClusterPolicyConfig(BaseModel):
+    """Cluster tradability policy defaults for backtesting."""
+
+    default_classes: list[Literal["ALLOW", "WATCH", "BLOCK"]] = Field(default_factory=lambda: ["ALLOW"])
+    include_watch_default: bool = False
+
+
+class BacktestNanPolicyConfig(BaseModel):
+    """Finite handling switches for backtest metrics and input sanitation."""
+
+    strict_finite_prices: bool = True
+    finite_aggregate_only: bool = True
+
+
+class BacktestConfig(BaseModel):
+    """Backtest harness defaults for state-driven execution research runs."""
+
+    signal_mode: Literal["state_entry", "state_transition_entry", "state_persistence_confirm"] = (
+        "state_transition_entry"
+    )
+    exit_mode: Literal["horizon", "state_exit", "horizon_or_state"] = "horizon_or_state"
+    hold_bars: int = Field(default=10, ge=1)
+    allow_overlap: bool = False
+    allow_unconfirmed: bool = False
+    equity_mode: Literal["event_returns_only", "daily_equity_curve"] = "event_returns_only"
+    fee_bps_per_side: float = Field(default=0.0, ge=0.0)
+    slippage_bps_per_side: float = Field(default=0.0, ge=0.0)
+    capital_base: float = Field(default=1.0, gt=0.0)
+    flow_mapping: BacktestFlowMappingConfig = Field(default_factory=BacktestFlowMappingConfig)
+    hmm_direction_inference: BacktestHMMDirectionInferenceConfig = Field(
+        default_factory=BacktestHMMDirectionInferenceConfig
+    )
+    cluster_policy: BacktestClusterPolicyConfig = Field(default_factory=BacktestClusterPolicyConfig)
+    nan_policy: BacktestNanPolicyConfig = Field(default_factory=BacktestNanPolicyConfig)
+
+
+class BacktestPolicyOverlayConfig(BaseModel):
+    """Hybrid policy overlay defaults for gating primary state signals."""
+
+    default_overlay_mode: Literal[
+        "none", "allow_only", "allow_watch", "block_veto", "allow_or_unknown"
+    ] = "none"
+    join_keys: list[str] = Field(default_factory=lambda: ["ticker", "trade_date"], min_length=1)
+    allow_unknown_for_block_veto: bool = True
+    min_overlay_match_rate_warn: float = Field(default=0.80, ge=0.0, le=1.0)
+    dedupe_rule: Literal["first"] = "first"
+    enable_direction_conflict_metrics: bool = True
+
+
+class BacktestSensitivityDefaultGridConfig(BaseModel):
+    """Default parameter grid for backtest sensitivity runs."""
+
+    hold_bars: list[int] = Field(default_factory=lambda: [5, 10, 15, 20], min_length=1)
+    signal_mode: list[Literal["state_entry", "state_transition_entry", "state_persistence_confirm"]] = (
+        Field(default_factory=lambda: ["state_transition_entry"], min_length=1)
+    )
+    exit_mode: list[Literal["horizon", "state_exit", "horizon_or_state"]] = Field(
+        default_factory=lambda: ["horizon_or_state"], min_length=1
+    )
+    fee_bps_per_side: list[float] = Field(default_factory=lambda: [0.0, 5.0, 10.0], min_length=1)
+    slippage_bps_per_side: list[float] = Field(default_factory=lambda: [0.0], min_length=1)
+    allow_overlap: list[bool] = Field(default_factory=lambda: [False], min_length=1)
+    equity_mode: list[Literal["event_returns_only", "daily_equity_curve"]] = Field(
+        default_factory=lambda: ["event_returns_only"],
+        min_length=1,
+    )
+    include_watch: list[bool] = Field(default_factory=lambda: [False], min_length=1)
+    include_state_sets: list[list[int]] = Field(default_factory=lambda: [[]], min_length=1)
+
+
+class BacktestSensitivityRobustnessWeightsConfig(BaseModel):
+    """Weights for backtest sensitivity robustness score composition."""
+
+    expectancy_rank: float = 0.30
+    profit_factor_rank: float = 0.20
+    drawdown_score: float = 0.20
+    consistency: float = 0.15
+    cost_robustness: float = 0.10
+    hygiene: float = 0.05
+
+
+class BacktestSensitivityConfig(BaseModel):
+    """Controls for backtest sensitivity grid orchestration and ranking."""
+
+    progress_every: int = Field(default=10, ge=1)
+    max_combos: int = Field(default=500, ge=1)
+    stop_on_error: bool = False
+    policy_filter_mode_default: Literal["allow_only", "allow_watch", "all_states"] = "allow_only"
+    include_ret_cv_default: bool = True
+    include_tail_metrics_default: bool = True
+    report_top_n_default: int = Field(default=10, ge=1)
+    min_successful_splits_default: int = Field(default=1, ge=1)
+    default_grid: BacktestSensitivityDefaultGridConfig = Field(default_factory=BacktestSensitivityDefaultGridConfig)
+    ranking_metric_default: Literal[
+        "expectancy",
+        "profit_factor",
+        "max_drawdown",
+        "sharpe_proxy",
+        "robustness_score",
+        "robustness_score_v2",
+        "ret_cv",
+        "downside_std",
+    ] = "expectancy"
+    robustness_score_weights: BacktestSensitivityRobustnessWeightsConfig = Field(
+        default_factory=BacktestSensitivityRobustnessWeightsConfig
+    )
+
+
 class IndicatorsConfig(BaseModel):
     """Indicator-layer parameterization for Silver-derived signals."""
 
@@ -329,6 +525,12 @@ class AppSettings(BaseSettings):
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
     event_grammar: EventGrammarConfig = Field(default_factory=EventGrammarConfig)
     gold_features: GoldFeaturesConfig = Field(default_factory=GoldFeaturesConfig)
+    validation_walkforward: ValidationWalkForwardConfig = Field(default_factory=ValidationWalkForwardConfig)
+    cluster_qa: ClusterQAConfig = Field(default_factory=ClusterQAConfig)
+    cluster_hardening: ClusterHardeningConfig = Field(default_factory=ClusterHardeningConfig)
+    backtest: BacktestConfig = Field(default_factory=BacktestConfig)
+    backtest_policy_overlay: BacktestPolicyOverlayConfig = Field(default_factory=BacktestPolicyOverlayConfig)
+    backtest_sensitivity: BacktestSensitivityConfig = Field(default_factory=BacktestSensitivityConfig)
     research_clustering: ResearchClusteringConfig = Field(default_factory=ResearchClusteringConfig)
     research_hmm: ResearchHMMConfig = Field(default_factory=ResearchHMMConfig)
 

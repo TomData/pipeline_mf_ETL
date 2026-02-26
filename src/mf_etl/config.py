@@ -329,6 +329,21 @@ class BacktestExecutionRealismConfig(BaseModel):
     report_max_ret_cv_default: float = Field(default=20.0, gt=0.0)
 
 
+class OverlayViewerFlowStateConfig(BaseModel):
+    """Local flow-state grammar defaults for overlay viewer ticker compute."""
+
+    hold_thr: float = Field(default=0.0, ge=0.0)
+    burst_thr: float = Field(default=0.10, ge=0.0)
+    persistence_window: int = Field(default=20, ge=2)
+    persistent_min_hits: int = Field(default=10, ge=1)
+
+
+class OverlayViewerConfig(BaseModel):
+    """Overlay viewer app-level local compute defaults."""
+
+    flow_states: OverlayViewerFlowStateConfig = Field(default_factory=OverlayViewerFlowStateConfig)
+
+
 class BacktestExecutionCalibrationSweepConfig(BaseModel):
     """Default threshold sweep ranges for execution realism calibration."""
 
@@ -449,6 +464,16 @@ class CandidateRerunConfig(BaseModel):
     micro_grid: CandidateRerunMicroGridConfig = Field(default_factory=CandidateRerunMicroGridConfig)
     wf_run_enable_default: bool = False
     eps: float = Field(default=1e-12, gt=0.0)
+
+
+class OpsNightlyConfig(BaseModel):
+    """Nightly Research Ops Pack v1 defaults."""
+
+    default_ledger_path: Path = Path("ops_ledger/ops_ledger.csv")
+    keep_last_n: int = Field(default=30, ge=1)
+    default_coverage_mode: Literal["warn_only", "strict_fail"] = "warn_only"
+    default_wf_enabled: bool = True
+    default_timer_on_calendar: str = "07:30"
 
 
 class IndicatorsConfig(BaseModel):
@@ -661,11 +686,13 @@ class AppSettings(BaseSettings):
     backtest_execution_realism: BacktestExecutionRealismConfig = Field(
         default_factory=BacktestExecutionRealismConfig
     )
+    overlay_viewer: OverlayViewerConfig = Field(default_factory=OverlayViewerConfig)
     backtest_execution_calibration: BacktestExecutionCalibrationConfig = Field(
         default_factory=BacktestExecutionCalibrationConfig
     )
     backtest_sensitivity: BacktestSensitivityConfig = Field(default_factory=BacktestSensitivityConfig)
     candidate_rerun: CandidateRerunConfig = Field(default_factory=CandidateRerunConfig)
+    ops_nightly: OpsNightlyConfig = Field(default_factory=OpsNightlyConfig)
     research_clustering: ResearchClusteringConfig = Field(default_factory=ResearchClusteringConfig)
     research_hmm: ResearchHMMConfig = Field(default_factory=ResearchHMMConfig)
 

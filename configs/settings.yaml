@@ -193,6 +193,13 @@ backtest_execution_realism:
   report_max_zero_trade_share_default: 0.50
   report_max_ret_cv_default: 20.0
 
+overlay_viewer:
+  flow_states:
+    hold_thr: 0.0
+    burst_thr: 0.10
+    persistence_window: 20
+    persistent_min_hits: 10
+
 backtest_execution_calibration:
   sweep:
     min_price: [0.0, 1.0, 2.0, 5.0]
@@ -256,6 +263,13 @@ candidate_rerun:
     max_combos: 9
   wf_run_enable_default: false
   eps: 1.0e-12
+
+ops_nightly:
+  default_ledger_path: ops_ledger/ops_ledger.csv
+  keep_last_n: 30
+  default_coverage_mode: warn_only
+  default_wf_enabled: true
+  default_timer_on_calendar: "07:30"
 
 research_clustering:
   default_feature_list:

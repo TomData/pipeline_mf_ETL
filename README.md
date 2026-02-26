@@ -785,3 +785,113 @@ CRP outputs:
   - `candidates/<CANDIDATE>/drift_metrics.json`
   - `candidates/<CANDIDATE>/coverage_drift_metrics.json`
   - optional `micro_grid_dir.txt`
+
+## Nightly Research Ops Pack v1
+
+Nightly Research Ops Pack (NROP v1) automates daily research-ops checks on top of PCP + CRP + overlay coverage hardening.
+
+- main command:
+  - `python -m mf_etl.cli ops-nightly-run --pcp-pack-dir <PCP_DIR> --wf-run-dir <WF_DIR> --as-of-tag YYYY-MM-DD`
+- sanity command:
+  - `python -m mf_etl.cli ops-nightly-sanity --ops-run-dir <OPS_RUN_DIR>`
+- ledger preview:
+  - `python -m mf_etl.cli ops-ledger-view --last 10`
+
+What nightly run does:
+
+- auto-discovers latest PCP pack (unless `--pcp-pack-dir` is provided)
+- executes CRP rerun with optional WF check and overlay coverage policy passthrough
+- builds daily ops report (JSON/CSV/MD)
+- appends one row to cumulative ledger CSV
+- optionally cleans up old ops run dirs with `--keep-last-n`
+
+NROP outputs:
+
+- `artifacts/ops_runs/ops-<id>_nightly_ops_v1/ops_manifest.json`
+- `artifacts/ops_runs/ops-<id>_nightly_ops_v1/ops_summary.json`
+- `artifacts/ops_runs/ops-<id>_nightly_ops_v1/ops_report.md`
+- `artifacts/ops_runs/ops-<id>_nightly_ops_v1/ops_report.csv`
+- `artifacts/ops_runs/ops-<id>_nightly_ops_v1/ops_warnings.json`
+- pointers:
+  - `crp_rerun_dir.txt`
+  - `wf_check_dir.txt` (when WF enabled)
+- ledger:
+  - `artifacts/ops_ledger/ops_ledger.csv`
+
+Optional systemd timer template writer:
+
+- `python -m mf_etl.cli ops-nightly-install-timer [--wf-run-dir <WF_DIR>] [--on-calendar 07:30]`
+
+This writes templates to `configs/systemd/`:
+
+- `mf_etl_ops_nightly.service`
+- `mf_etl_ops_nightly.timer`
+
+Install as user service:
+
+- `mkdir -p ~/.config/systemd/user`
+- `cp configs/systemd/mf_etl_ops_nightly.service ~/.config/systemd/user/`
+- `cp configs/systemd/mf_etl_ops_nightly.timer ~/.config/systemd/user/`
+- `systemctl --user daemon-reload`
+- `systemctl --user enable --now mf_etl_ops_nightly.timer`
+- `journalctl --user -u mf_etl_ops_nightly.service -n 200 --no-pager`
+
+## Beta Expert Advisor Overlay Viewer v1.1.2
+
+`overlay-viewer` is a local Streamlit visualization app for teaching/research.  
+It overlays research layers on price without any execution logic.
+
+Run:
+
+- `python -m mf_etl.cli overlay-viewer`
+
+Optional:
+
+- `python -m mf_etl.cli overlay-viewer --server-port 8502 --server-address 0.0.0.0`
+- `python -m mf_etl.cli overlay-compute-ticker --ticker AAPL.US --full-history --hmm-k 5 --exec-profile lite`
+
+Data source modes:
+
+- `CACHED (Compute Ticker)` (default): on-demand per-ticker compute pipeline with persistent cache under `artifacts/ticker_cache/<TICKER>/<run_id>/`
+- `GLOBAL ARTIFACTS (Latest)`: loads latest discovered global artifacts (legacy behavior)
+
+Cached compute artifacts per run:
+
+- `ohlcv.parquet`
+- `indicators.parquet` (TMF/TTI + helper series)
+- `states_flow.parquet` (always generated via local event grammar in cached compute mode)
+- `states_hmm.parquet` (local GaussianHMM decode + diagnostics columns)
+- `overlay_exec.parquet` (execution realism pass/fail)
+- `overlay_policy.parquet` (optional global overlay join)
+- `meta.json`, `summary.json`
+
+v1.1.1 patch:
+
+- local flow states are now always computed from TMF event grammar for cached ticker runs (`states_flow_source=local_event_grammar_v1`), including Bronze fallback compute paths
+- this keeps Flow band/S0..S4 teaching overlays available even when the latest ML dataset only contains a small ticker subset
+
+v1.1.2 patch:
+
+- HMM display controls for interpretability:
+  - `HMM Display Mode`: `RAW`, `SMOOTHED`, `GROUPED`, `SMOOTHED+GROUPED`
+  - smoothing controls: `method` (`mode`/`median`) + trailing `window`
+  - grouping controls: `LONG_NEUTRAL_SHORT` or `LONG_OTHER`, with `top_k`/`bottom_k`
+- grouped mapping can be persisted into cache `meta.json` under `display_mappings.hmm_group_display_v1`
+- grouped/smoothed HMM band reduces state flicker for classroom interpretation
+
+Viewer features:
+
+- candlestick chart + volume (separate panel or overlay)
+- TMF + TTI proxy indicator panel (Twiggs/Pine-consistent TRH/TRL + RMA logic)
+- state overlays:
+  - flow states
+  - HMM states
+  - cluster hardening policy class (`ALLOW`/`WATCH`/`BLOCK`)
+- execution realism pass/fail markers and blocked reasons
+- candidate signal markers from PCP candidate settings (or manual mode)
+
+Data assumptions:
+
+- minimum price columns: `trade_date`, `open`, `high`, `low`, `close`, `volume`
+- optional layers use available columns (`hmm_state`, `flow_state_code`, `cluster_id`, etc.)
+- if optional columns/files are missing, the app degrades gracefully and disables that layer with warnings

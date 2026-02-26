@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import subprocess
+import sys
 from datetime import date
 from pathlib import Path
 from typing import cast
@@ -85,6 +88,13 @@ from mf_etl.backtest.candidate_rerun import (
 )
 from mf_etl.backtest.execution_realism_report import run_execution_realism_report
 from mf_etl.backtest.hybrid_eval_report import run_hybrid_eval_report
+from mf_etl.apps.overlay_viewer.compute_ticker import (
+    ComputeTickerParams,
+    compute_ticker_cache,
+)
+from mf_etl.ops.nightly_ops import run_ops_nightly
+from mf_etl.ops.nightly_ops_discovery import discover_latest_pcp_pack
+from mf_etl.ops.nightly_ops_sanity import summarize_ops_run
 from mf_etl.backtest.sensitivity_runner import (
     run_backtest_grid,
     run_backtest_grid_compare,
@@ -5620,6 +5630,594 @@ def candidate_rerun_sanity(
     typer.echo(f"report_path: {summary.get('report_path')}")
     if errors:
         raise typer.Exit(code=1)
+
+
+@app.command("overlay-viewer")
+def overlay_viewer(
+    app_file: Path | None = typer.Option(
+        None,
+        "--app-file",
+        help="Optional Streamlit app file path override.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    server_port: int | None = typer.Option(
+        None,
+        "--server-port",
+        min=1,
+        max=65535,
+        help="Optional Streamlit server port.",
+    ),
+    server_address: str | None = typer.Option(
+        None,
+        "--server-address",
+        help="Optional Streamlit server address (e.g. 0.0.0.0).",
+    ),
+    headless: bool = typer.Option(
+        True,
+        "--headless/--no-headless",
+        help="Run Streamlit in headless mode (default true for reproducible CLI startup).",
+    ),
+) -> None:
+    """Launch local Beta Expert Advisor Overlay Viewer Streamlit app."""
+
+    if app_file is None:
+        app_file = Path(__file__).resolve().parent / "apps" / "overlay_viewer" / "app.py"
+    if not app_file.exists():
+        raise typer.BadParameter(f"Overlay viewer app file does not exist: {app_file}")
+
+    cmd = [sys.executable, "-m", "streamlit", "run", str(app_file)]
+    if server_port is not None:
+        cmd.extend(["--server.port", str(server_port)])
+    if server_address:
+        cmd.extend(["--server.address", server_address])
+    cmd.extend(["--server.headless", "true" if headless else "false"])
+    cmd.extend(["--browser.gatherUsageStats", "false"])
+
+    typer.echo(f"launching: {' '.join(cmd)}")
+    try:
+        env = os.environ.copy()
+        env["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
+        completed = subprocess.run(cmd, check=False, env=env)
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(
+            "Streamlit is not available in this environment. Install dependencies with `pip install -e .`."
+        ) from exc
+    if completed.returncode != 0:
+        raise typer.Exit(code=int(completed.returncode))
+
+
+@app.command("overlay-compute-ticker")
+def overlay_compute_ticker(
+    ticker: str = typer.Option(
+        ...,
+        "--ticker",
+        help="Ticker symbol (e.g. AAPL.US).",
+    ),
+    source_file: Path | None = typer.Option(
+        None,
+        "--source-file",
+        help="Optional source parquet/csv file; defaults to latest ML dataset when omitted.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    full_history: bool = typer.Option(
+        True,
+        "--full-history/--custom-range",
+        help="Use full ticker history (default true) or custom date range.",
+    ),
+    date_from: str | None = typer.Option(
+        None,
+        "--date-from",
+        help="Custom range start date YYYY-MM-DD (used only with --custom-range).",
+    ),
+    date_to: str | None = typer.Option(
+        None,
+        "--date-to",
+        help="Custom range end date YYYY-MM-DD (used only with --custom-range).",
+    ),
+    compute_flow_states: bool = typer.Option(
+        True,
+        "--compute-flow-states/--no-compute-flow-states",
+        help="Compute flow_state outputs when available in source.",
+    ),
+    compute_local_hmm_states: bool = typer.Option(
+        True,
+        "--compute-local-hmm-states/--no-compute-local-hmm-states",
+        help="Fit local per-ticker HMM and decode states.",
+    ),
+    compute_exec_realism: bool = typer.Option(
+        True,
+        "--compute-exec-realism/--no-compute-exec-realism",
+        help="Compute per-bar execution realism eligibility and reasons.",
+    ),
+    attempt_global_overlay_join: bool = typer.Option(
+        False,
+        "--attempt-global-overlay-join/--no-attempt-global-overlay-join",
+        help="Attempt joining global cluster hardening overlay policy if artifacts exist.",
+    ),
+    hmm_k: int = typer.Option(
+        5,
+        "--hmm-k",
+        min=2,
+        help="GaussianHMM n_components for local ticker modeling.",
+    ),
+    hmm_scaler: str = typer.Option(
+        "per_ticker",
+        "--hmm-scaler",
+        help="Scaling mode for local HMM features: per_ticker/global/standard/robust.",
+    ),
+    exec_profile: str = typer.Option(
+        "lite",
+        "--exec-profile",
+        help="Execution realism profile: none/lite/strict.",
+    ),
+    exec_min_price: float | None = typer.Option(
+        None,
+        "--exec-min-price",
+        help="Optional override for min price threshold.",
+    ),
+    exec_min_dollar_vol20: float | None = typer.Option(
+        None,
+        "--exec-min-dollar-vol20",
+        help="Optional override for 20-bar dollar volume threshold.",
+    ),
+    exec_max_vol_pct: float | None = typer.Option(
+        None,
+        "--exec-max-vol-pct",
+        help="Optional override for max volatility percent threshold.",
+    ),
+    exec_min_history_bars: int | None = typer.Option(
+        None,
+        "--exec-min-history-bars",
+        help="Optional override for minimum bars history required for execution.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Force recompute even when deterministic cache run already exists.",
+    ),
+) -> None:
+    """Compute + cache one ticker for overlay viewer CACHED mode."""
+
+    settings = load_settings()
+    ticker_norm = ticker.strip().upper()
+    if not ticker_norm:
+        raise typer.BadParameter("--ticker cannot be empty.")
+    try:
+        from mf_etl.apps.overlay_viewer.data_loader import (
+            load_symbol_master_tickers,
+            normalize_ticker_input,
+        )
+
+        symbol_universe = load_symbol_master_tickers(settings)
+        ticker_norm, norm_warnings = normalize_ticker_input(ticker_norm, symbol_universe)
+        for warning in norm_warnings:
+            typer.echo(f"note: {warning}")
+    except Exception:
+        pass
+
+    hmm_scaler_norm = hmm_scaler.strip().lower()
+    if hmm_scaler_norm not in {"per_ticker", "global", "standard", "robust"}:
+        raise typer.BadParameter("--hmm-scaler must be one of: per_ticker,global,standard,robust")
+    scaler_impl = "robust" if hmm_scaler_norm == "per_ticker" else ("standard" if hmm_scaler_norm == "global" else hmm_scaler_norm)
+
+    exec_profile_norm = exec_profile.strip().lower()
+    if exec_profile_norm not in {"none", "lite", "strict"}:
+        raise typer.BadParameter("--exec-profile must be one of: none,lite,strict")
+
+    parsed_from = _parse_iso_date(date_from, "--date-from") if date_from is not None else None
+    parsed_to = _parse_iso_date(date_to, "--date-to") if date_to is not None else None
+    if not full_history:
+        if parsed_from is None or parsed_to is None:
+            raise typer.BadParameter("--date-from and --date-to are required with --custom-range.")
+        if parsed_from > parsed_to:
+            raise typer.BadParameter("--date-from must be <= --date-to.")
+
+    typer.echo(f"computing ticker cache: ticker={ticker_norm} source={source_file or 'auto'}")
+    result = compute_ticker_cache(
+        settings,
+        ComputeTickerParams(
+            ticker=ticker_norm,
+            source_file=source_file,
+            full_history=full_history,
+            date_from=parsed_from,
+            date_to=parsed_to,
+            compute_flow_states=compute_flow_states,
+            compute_local_hmm_states=compute_local_hmm_states,
+            compute_exec_realism=compute_exec_realism,
+            attempt_global_overlay_join=attempt_global_overlay_join,
+            hmm_n_components=int(hmm_k),
+            hmm_scaler=scaler_impl,
+            exec_profile=exec_profile_norm,
+            exec_min_price=exec_min_price,
+            exec_min_dollar_vol20=exec_min_dollar_vol20,
+            exec_max_vol_pct=exec_max_vol_pct,
+            exec_min_history_bars=exec_min_history_bars,
+            force=force,
+        ),
+    )
+
+    typer.echo(f"ticker: {result.ticker}")
+    typer.echo(f"run_id: {result.run_id}")
+    typer.echo(f"run_dir: {result.run_dir}")
+    typer.echo(f"cache_hit: {result.cache_hit}")
+    typer.echo(f"meta_path: {result.meta_path}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    if result.warnings:
+        typer.echo(f"warnings: {len(result.warnings)}")
+        for warning in result.warnings[:20]:
+            typer.echo(f"- {warning}")
+
+
+@app.command("ops-nightly-run")
+def ops_nightly_run(
+    pcp_pack_dir: Path | None = typer.Option(
+        None,
+        "--pcp-pack-dir",
+        help="Optional PCP pack directory; if omitted latest PCP pack is auto-discovered.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    wf_run_dir: Path | None = typer.Option(
+        None,
+        "--wf-run-dir",
+        help="Optional validation walk-forward directory used by CRP wf checks.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    as_of_tag: str | None = typer.Option(
+        None,
+        "--as-of-tag",
+        help="Optional run label; default is local YYYY-MM-DD.",
+    ),
+    run_wf_check: bool | None = typer.Option(
+        None,
+        "--run-wf-check/--no-run-wf-check",
+        help="Enable/disable lightweight wf rerun check; defaults to true when --wf-run-dir is provided.",
+    ),
+    wf_strict_coverage: bool = typer.Option(
+        False,
+        "--wf-strict-coverage",
+        help="Force strict overlay coverage handling for wf reruns (strict_fail mode if mode not set).",
+    ),
+    ledger_path: Path | None = typer.Option(
+        None,
+        "--ledger-path",
+        help="Optional ledger CSV path; default comes from settings ops_nightly.default_ledger_path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    keep_last_n: int | None = typer.Option(
+        None,
+        "--keep-last-n",
+        min=1,
+        help="Keep only last N ops run dirs under artifacts/ops_runs.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print resolved inputs/settings and exit without running CRP.",
+    ),
+    overlay_coverage_mode: str | None = typer.Option(
+        None,
+        "--overlay-coverage-mode",
+        help="Overlay coverage policy mode for reruns: warn_only or strict_fail.",
+    ),
+    overlay_min_match_rate_warn: float | None = typer.Option(
+        None, "--overlay-min-match-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_min_match_rate_fail: float | None = typer.Option(
+        None, "--overlay-min-match-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_unknown_rate_warn: float | None = typer.Option(
+        None, "--overlay-unknown-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_unknown_rate_fail: float | None = typer.Option(
+        None, "--overlay-unknown-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_min_year_match_rate_warn: float | None = typer.Option(
+        None, "--overlay-min-year-match-rate-warn", min=0.0, max=1.0
+    ),
+    overlay_min_year_match_rate_fail: float | None = typer.Option(
+        None, "--overlay-min-year-match-rate-fail", min=0.0, max=1.0
+    ),
+    overlay_coverage_bypass: bool = typer.Option(
+        False,
+        "--overlay-coverage-bypass",
+        help="Bypass strict coverage fail and proceed.",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Run Nightly Research Ops Pack v1 (NROP) and update ops ledger."""
+
+    settings, logger = _load_and_optionally_configure_logger(config_file, configure=True)
+    coverage_mode_norm = _normalize_choice(
+        overlay_coverage_mode,
+        allowed={"warn_only", "strict_fail"},
+        option_name="overlay-coverage-mode",
+    )
+
+    resolved_pcp = pcp_pack_dir or discover_latest_pcp_pack(settings.paths.artifacts_root)
+    if dry_run:
+        wf_enabled = run_wf_check if run_wf_check is not None else (wf_run_dir is not None)
+        typer.echo("dry_run=true")
+        typer.echo(f"pcp_pack_dir: {resolved_pcp}")
+        typer.echo(f"wf_run_dir: {wf_run_dir}")
+        typer.echo(f"wf_enabled: {wf_enabled}")
+        typer.echo(f"as_of_tag: {as_of_tag}")
+        typer.echo(f"overlay_coverage_mode: {coverage_mode_norm or settings.ops_nightly.default_coverage_mode}")
+        typer.echo("action: no artifacts written")
+        return
+
+    result = run_ops_nightly(
+        settings,
+        pcp_pack_dir=resolved_pcp,
+        wf_run_dir=wf_run_dir,
+        as_of_tag=as_of_tag,
+        run_wf_check=run_wf_check,
+        wf_strict_coverage=wf_strict_coverage,
+        ledger_path=ledger_path,
+        keep_last_n=keep_last_n,
+        overlay_coverage_mode=coverage_mode_norm,
+        overlay_min_match_rate_warn=overlay_min_match_rate_warn,
+        overlay_min_match_rate_fail=overlay_min_match_rate_fail,
+        overlay_unknown_rate_warn=overlay_unknown_rate_warn,
+        overlay_unknown_rate_fail=overlay_unknown_rate_fail,
+        overlay_min_year_match_rate_warn=overlay_min_year_match_rate_warn,
+        overlay_min_year_match_rate_fail=overlay_min_year_match_rate_fail,
+        overlay_coverage_bypass=overlay_coverage_bypass,
+        logger=logger,
+    )
+    summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    report_df = pl.read_csv(result.report_csv_path)
+
+    typer.echo(f"ops_run_id: {result.run_id}")
+    typer.echo(f"output_dir: {result.output_dir}")
+    typer.echo(f"OPS_STATUS: {summary.get('ops_status')}")
+    typer.echo(f"pcp_pack_id: {summary.get('pcp_pack_id')}")
+    typer.echo(f"crp_rerun_id: {summary.get('crp_rerun_id')}")
+    typer.echo("candidate_snapshot:")
+    for row in report_df.sort("candidate_label").to_dicts():
+        typer.echo(
+            f"{row.get('candidate_label')}: status={row.get('drift_status')} "
+            f"exp={row.get('expectancy')} pf={row.get('profit_factor')} "
+            f"ret_cv={row.get('ret_cv')} trades={row.get('trade_count')} "
+            f"coverage={row.get('coverage_status')} coverage_drift={row.get('coverage_drift_status')}"
+        )
+    wf = summary.get("wf", {})
+    if wf.get("enabled"):
+        typer.echo(
+            "wf_summary: "
+            f"success={wf.get('split_count_success')} failed={wf.get('split_count_failed')} "
+            f"wins(exp/pf/rob/retcv)={wf.get('wins_expectancy')}/{wf.get('wins_pf')}/"
+            f"{wf.get('wins_robustness_v2')}/{wf.get('wins_ret_cv')}"
+        )
+    warnings = summary.get("warnings", [])
+    typer.echo(f"warnings: {len(warnings)}")
+    for warning in warnings[:20]:
+        typer.echo(f"- {warning}")
+    typer.echo(f"manifest_path: {result.manifest_path}")
+    typer.echo(f"summary_path: {result.summary_path}")
+    typer.echo(f"report_path: {result.report_path}")
+    typer.echo(f"report_csv_path: {result.report_csv_path}")
+    typer.echo(f"warnings_path: {result.warnings_path}")
+    typer.echo(f"ledger_path: {result.ledger_path}")
+
+
+@app.command("ops-nightly-sanity")
+def ops_nightly_sanity(
+    ops_run_dir: Path = typer.Option(
+        ...,
+        "--ops-run-dir",
+        help="Nightly ops output directory (ops-*_nightly_ops_v1).",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+) -> None:
+    """Validate NROP artifacts, linked CRP outputs, and ledger append."""
+
+    summary = summarize_ops_run(ops_run_dir)
+    typer.echo(f"ops_run_dir: {summary.get('ops_run_dir')}")
+    typer.echo(f"ops_status: {summary.get('ops_status')}")
+    typer.echo(f"candidate_count: {summary.get('candidate_count')}")
+    typer.echo(f"non_finite_cells: {summary.get('non_finite_cells')}")
+    warnings = summary.get("warnings", [])
+    errors = summary.get("errors", [])
+    typer.echo(f"warnings: {len(warnings)}")
+    for warning in warnings[:20]:
+        typer.echo(f"- {warning}")
+    typer.echo(f"errors: {len(errors)}")
+    for error in errors[:20]:
+        typer.echo(f"- {error}")
+    typer.echo(f"manifest_path: {summary.get('manifest_path')}")
+    typer.echo(f"summary_path: {summary.get('summary_path')}")
+    typer.echo(f"report_path: {summary.get('report_path')}")
+    typer.echo(f"report_csv_path: {summary.get('report_csv_path')}")
+    typer.echo(f"warnings_path: {summary.get('warnings_path')}")
+    typer.echo(f"ledger_path: {summary.get('ledger_path')}")
+    if errors:
+        raise typer.Exit(code=1)
+
+
+@app.command("ops-ledger-view")
+def ops_ledger_view(
+    last: int = typer.Option(10, "--last", min=1, help="Number of most recent ledger rows to print."),
+    candidate: str | None = typer.Option(
+        None,
+        "--candidate",
+        help="Optional candidate filter: CANDIDATE_ALPHA, CANDIDATE_EXEC, or CANDIDATE_EXEC_2.",
+    ),
+    ledger_path: Path | None = typer.Option(
+        None,
+        "--ledger-path",
+        help="Optional ledger CSV path override.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Print last N rows from ops ledger CSV."""
+
+    settings, _logger = _load_and_optionally_configure_logger(config_file, configure=False)
+    resolved_ledger = (
+        ledger_path
+        if ledger_path is not None
+        else (settings.paths.artifacts_root / settings.ops_nightly.default_ledger_path)
+    )
+    if not resolved_ledger.is_absolute():
+        resolved_ledger = (settings.paths.artifacts_root / resolved_ledger).resolve()
+    if not resolved_ledger.exists():
+        raise typer.BadParameter(f"Ledger file does not exist: {resolved_ledger}")
+
+    ledger = pl.read_csv(resolved_ledger)
+    if "built_ts" in ledger.columns:
+        ledger = ledger.sort("built_ts", descending=True)
+
+    prefix: str | None = None
+    if candidate is not None:
+        label = candidate.strip().upper()
+        mapping = {
+            "CANDIDATE_ALPHA": "alpha",
+            "CANDIDATE_EXEC": "exec",
+            "CANDIDATE_EXEC_2": "exec2",
+        }
+        prefix = mapping.get(label)
+        if prefix is None:
+            raise typer.BadParameter("candidate must be one of: CANDIDATE_ALPHA,CANDIDATE_EXEC,CANDIDATE_EXEC_2")
+
+    ledger_view = ledger.head(last)
+    typer.echo(f"ledger_path: {resolved_ledger}")
+    typer.echo(f"rows_total: {ledger.height}")
+    typer.echo(f"rows_printed: {ledger_view.height}")
+    for row in ledger_view.to_dicts():
+        if prefix is None:
+            typer.echo(
+                f"ops_run_id={row.get('ops_run_id')} as_of={row.get('as_of_tag')} status={row.get('ops_status')} "
+                f"alpha_exp={row.get('alpha_expectancy')} exec_exp={row.get('exec_expectancy')} "
+                f"exec_match={row.get('exec_overlay_match_rate')} wf_success={row.get('wf_split_success_count')}"
+            )
+        else:
+            typer.echo(
+                f"ops_run_id={row.get('ops_run_id')} as_of={row.get('as_of_tag')} status={row.get('ops_status')} "
+                f"{prefix}_exp={row.get(prefix + '_expectancy')} {prefix}_pf={row.get(prefix + '_pf')} "
+                f"{prefix}_ret_cv={row.get(prefix + '_ret_cv')} {prefix}_trades={row.get(prefix + '_trades')} "
+                f"{prefix}_drift={row.get(prefix + '_drift_status')}"
+            )
+
+
+@app.command("ops-nightly-install-timer")
+def ops_nightly_install_timer(
+    wf_run_dir: Path | None = typer.Option(
+        None,
+        "--wf-run-dir",
+        help="Optional wf run directory passed into ops-nightly-run command in systemd service.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    on_calendar: str | None = typer.Option(
+        None,
+        "--on-calendar",
+        help="systemd OnCalendar value; default from settings ops_nightly.default_timer_on_calendar.",
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config-file",
+        help="Optional settings YAML path.",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """Write systemd user service/timer templates under configs/systemd/."""
+
+    settings, _logger = _load_and_optionally_configure_logger(config_file, configure=False)
+    project_root = Path(__file__).resolve().parents[2]
+    systemd_dir = project_root / "configs" / "systemd"
+    systemd_dir.mkdir(parents=True, exist_ok=True)
+
+    calendar_value = on_calendar or settings.ops_nightly.default_timer_on_calendar
+    exec_cmd = "/usr/bin/python -m mf_etl.cli ops-nightly-run"
+    if wf_run_dir is not None:
+        exec_cmd += f" --wf-run-dir {wf_run_dir}"
+
+    service_path = systemd_dir / "mf_etl_ops_nightly.service"
+    timer_path = systemd_dir / "mf_etl_ops_nightly.timer"
+
+    service_text = "\n".join(
+        [
+            "[Unit]",
+            "Description=mf_etl nightly research ops run",
+            "",
+            "[Service]",
+            "Type=oneshot",
+            f"WorkingDirectory={project_root}",
+            f"ExecStart={exec_cmd}",
+            "",
+            "[Install]",
+            "WantedBy=default.target",
+            "",
+        ]
+    )
+    timer_text = "\n".join(
+        [
+            "[Unit]",
+            "Description=Run mf_etl nightly research ops daily",
+            "",
+            "[Timer]",
+            f"OnCalendar={calendar_value}",
+            "Persistent=true",
+            "",
+            "[Install]",
+            "WantedBy=timers.target",
+            "",
+        ]
+    )
+    service_path.write_text(service_text, encoding="utf-8")
+    timer_path.write_text(timer_text, encoding="utf-8")
+
+    typer.echo(f"service_path: {service_path}")
+    typer.echo(f"timer_path: {timer_path}")
+    typer.echo("install_hint:")
+    typer.echo("  mkdir -p ~/.config/systemd/user")
+    typer.echo("  cp configs/systemd/mf_etl_ops_nightly.service ~/.config/systemd/user/")
+    typer.echo("  cp configs/systemd/mf_etl_ops_nightly.timer ~/.config/systemd/user/")
+    typer.echo("  systemctl --user daemon-reload")
+    typer.echo("  systemctl --user enable --now mf_etl_ops_nightly.timer")
+    typer.echo("  journalctl --user -u mf_etl_ops_nightly.service -n 200 --no-pager")
 
 
 def main() -> None:
